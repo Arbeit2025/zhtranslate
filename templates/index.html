@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Chinese Accuracy-First MT v1</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>Chinese Accuracy-First MT <span>v1</span></h1>
+    <p>多言語 → 中国語。流暢さだけで通さず、数値・保護記法・簡繁字・地域表記・構文解析・逆翻訳を検査する精度優先ワークベンチ。</p>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="card controls">
+    <div class="row">
+      <label>入力言語
+        <select id="source">
+          {% for lang in languages %}<option value="{{ lang.value }}">{{ lang.label }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>出力
+        <select id="target">
+          {% for target in targets %}<option value="{{ target.value }}">{{ target.label }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>文体
+        <select id="style">
+          <option value="formal">標準・フォーマル</option>
+          <option value="wikipedia">百科事典 / Wikipedia</option>
+          <option value="neutral">ニュートラル</option>
+        </select>
+      </label>
+      <label class="check"><input id="back" type="checkbox" checked> 逆翻訳検査</label>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <div class="label">原文</div>
+      <textarea id="input" placeholder="日本語や英語などを貼り付けてください。">中国は東アジアに位置する国で、首都は北京である。</textarea>
+      <details>
+        <summary>固定用語集</summary>
+        <p class="hint">1行1語。<code>原語=中国語</code> またはタブ区切り。</p>
+        <textarea id="glossary" class="smallarea" placeholder="自己調整学習=自我调节学习&#10;OpenAI=OpenAI"></textarea>
+      </details>
+      <div class="actions">
+        <button id="go" class="primary">精密翻訳</button>
+        <button id="clear">クリア</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="resulthead">
+        <div class="label" id="targetLabel">中文</div>
+        <span id="overall" class="badge idle">IDLE</span>
+      </div>
+      <pre id="output" class="output">ここに翻訳結果が表示されます。</pre>
+      <div class="actions">
+        <button id="copy">コピー</button>
+        <button id="json">分析JSON</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>文ごとの検証</h2>
+    <div id="docchecks"></div>
+    <div id="sentences" class="sentences"><p class="muted">まだ解析していません。</p></div>
+  </section>
+
+  <section class="card note">
+    <h2>判定の意味</h2>
+    <p><b>READY</b> は、このツール内の必須検査を通った文。<b>REVIEW</b> は意味・文体・表記などに確認点あり。<b>HOLD</b> は数値脱落、保護記法破損、極端に低い逆翻訳一致度など、直接利用を止める条件がある文です。</p>
+    <p>中国語同士の変換では NLLB で言い換えず、OpenCC による簡繁字・地域表記変換を優先します。専門用語・人名・地名・法律・医療文などは人間による確認を前提にしてください。</p>
+  </section>
+</main>
+
+<script>
+let lastResult = null;
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function badge(status){
+  const cls = status === 'READY' ? 'ready' : status === 'REVIEW' ? 'review' : status === 'HOLD' ? 'hold' : 'idle';
+  return `<span class="badge ${cls}">${esc(status)}</span>`;
+}
+function render(data){
+  lastResult = data;
+  $('output').textContent = data.translation || '［翻訳なし］';
+  $('targetLabel').textContent = data.target_language?.label || '中文';
+  $('overall').textContent = data.status;
+  $('overall').className = 'badge ' + (data.status === 'READY' ? 'ready' : data.status === 'REVIEW' ? 'review' : 'hold');
+  $('docchecks').innerHTML = (data.document_checks || []).map(c => `<div class="notice ${c.level}"><b>${esc(c.code)}</b> ${esc(c.message)}</div>`).join('');
+  $('sentences').innerHTML = data.sentences.map((s,i)=>{
+    const checks = s.checks.map(c => `<li class="${c.level}"><b>${esc(c.code)}</b> ${esc(c.message)}</li>`).join('');
+    const bt = s.backtranslation ? `<div class="bt"><b>逆翻訳</b> ${esc(s.backtranslation)}${s.roundtrip_similarity != null ? ` <span class="score">${s.roundtrip_similarity}%</span>` : ''}</div>` : '';
+    return `<article class="sentence">
+      <div class="sentenceHead"><b>文 ${i+1}</b>${badge(s.status)}</div>
+      <div class="src">${esc(s.source)}</div>
+      <div class="tgt">${esc(s.translation || '［翻訳保留］')}</div>
+      ${bt}
+      <details><summary>検査 ${s.checks.length}件</summary><ul class="checks">${checks}</ul></details>
+    </article>`;
+  }).join('');
+}
+
+$('go').onclick = async () => {
+  const btn = $('go'); btn.disabled = true; btn.textContent = '解析中…';
+  $('overall').textContent = 'RUNNING'; $('overall').className = 'badge idle';
+  try{
+    const res = await fetch('/api/translate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      text:$('input').value, source:$('source').value, target:$('target').value, style:$('style').value,
+      glossary:$('glossary').value, backtranslation:$('back').checked
+    })});
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || '翻訳に失敗しました');
+    render(data);
+  }catch(e){
+    $('overall').textContent = 'ERROR'; $('overall').className = 'badge hold';
+    $('output').textContent = String(e.message || e);
+  }finally{ btn.disabled = false; btn.textContent = '精密翻訳'; }
+};
+$('clear').onclick = () => { $('input').value=''; $('output').textContent=''; $('docchecks').innerHTML=''; $('sentences').innerHTML='<p class="muted">まだ解析していません。</p>'; };
+$('copy').onclick = async () => { if(lastResult) await navigator.clipboard.writeText(lastResult.translation || ''); };
+$('json').onclick = () => {
+  if(!lastResult) return;
+  const blob = new Blob([JSON.stringify(lastResult,null,2)], {type:'application/json'});
+  const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='chinese-accuracy-analysis.json'; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),500);
+};
+</script>
+</body>
+</html>
