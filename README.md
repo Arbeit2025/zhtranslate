@@ -116,9 +116,10 @@ OpenCC は Apache-2.0 で、Python API と中国大陸・台湾・香港向け�
 
 ## Tests
 
-モデルをロードしない軽量検査:
+モデルをロードしない軽量検査（pytest は開発用依存関係として requirements-dev.txt に分離しています）:
 
 ```bash
+pip install -r requirements-dev.txt
 pytest -q
 ```
 
