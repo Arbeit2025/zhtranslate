@@ -109,6 +109,10 @@ NUMBER_RE = re.compile(r'(?<![0-9A-Za-z])[+-]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.
 # for extraction only.
 _NUMBER_NORMALIZE = str.maketrans('０１２３４５６７８９．，％＋－', '0123456789.,%+-')
 TOKEN_RE = re.compile(r'ZZ(?:PROT|TERM|TECH)\d+ZZ')
+# A Latin sentence split must not happen right after an abbreviation or
+# an initial: "Dr. Smith ..." and "Use e.g. this ..." were split into
+# fragments that were then translated as separate sentences.
+_ABBREV_END_RE = re.compile(r'(?:[A-Z]\.|(?:Mr|Mrs|Ms|Dr|St|Prof|Fig|vs|etc|No|e\.g|i\.e|a\.m|p\.m|U\.S\.A|U\.S|U\.K)\.)$')
 HAN_RE = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]')
 # Do NOT use \b here: in Python re, CJK kana/kanji are \w, so there is
 # no word boundary between e.g. "OpenAI" and a following "は". With \b
@@ -311,10 +315,23 @@ class AccuracyFirstChineseTranslator:
             # Split Japanese/Chinese punctuation even with no following space.
             # Latin punctuation splits when followed by whitespace.
             parts = re.split(r'(?<=[。！？!?])|(?<=[.!?])\s+', paragraph)
+            # Re-join fragments that end in an abbreviation / initial;
+            # the whitespace consumed by the split is restored as one space.
+            merged: List[str] = []
             for p in parts:
                 p = p.strip()
-                if p:
-                    out.append(restore(p))
+                if not p:
+                    continue
+                # A part ending in a protection token + '.' (e.g. a URL
+                # restored later) is not an abbreviation: the token's
+                # trailing "Z." would otherwise look like an initial.
+                if (merged and _ABBREV_END_RE.search(merged[-1])
+                        and not re.search(TOKEN_RE.pattern + r'[.!?]?$', merged[-1])):
+                    merged[-1] = merged[-1] + ' ' + p
+                else:
+                    merged.append(p)
+            for p in merged:
+                out.append(restore(p))
         return out or [text]
 
     @staticmethod

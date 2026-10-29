@@ -67,5 +67,21 @@
 - 変更ファイル: `translator.py`、`tests/test_hardening.py`（新規）、`README.md`、`docs/mini_dev_log.md`（新規・本ファイル）。
 - 未実施・未確認: 実モデル（NLLB）での実翻訳検証、GitHub Actions（tests.yml）の実行結果。
 - 公開先（Render）の反映確認（ChatGPT側 PR #2 の残件）: 2026-10-29 16:34 JST に `https://zhtranslate.onrender.com/api/health` を読み取りのみで確認した。`ok: true`、`revision` は main と一致する `f33bb4e24f9266aabba5d0ca7acd6dbdc38c8787`、`memory_limit_mb: 512`、`model_state: insufficient_memory`、`translation_ready: false` で、PR #2 の設計どおり「512MB 環境では NLLB 翻訳は 503 で理由を返し、中国語同士の表記変換のみ提供」が公開先でも成立していることを確認した。公開先での実際の翻訳リクエスト送信は行っていない。本ブランチ（PR #3）の内容は当然まだ公開先に反映されていない。
+
+---
+
+# 第2ラウンド（エントリ6〜10、2026-10-29）
+
+前提: PR #3 はユーザーの指示で 2026-10-29 にマージ済み（main マージコミット `983bfee4`）。第2ラウンドは main 起点の別ブランチ `ai/muse/zhtranslate-hardening2-20261029` で実施し、Draft PR として提出する。ベースラインは74件。
+
+## エントリ6（2026-10-29）英語の略語・イニシャルで文が誤って分割される問題の対策
+
+- 対象: `translator.py`（`split_sentences`、`_ABBREV_END_RE` 新設）、`tests/test_hardening.py`（テスト2件追加）
+- 予測した不具合: ラテン文字の文分割が「ピリオド＋空白」で無条件に切るため、`Dr. Smith went…` が `Dr.` と残りに、`Use e.g. this…` が `Use e.g.` と残りに割れ、断片が別々の文として翻訳されて文脈と語順が壊れる。実測で再現を確認（修正前: `split_sentences('Dr. Smith went to Washington. He stayed there.')` は3文に分割）。
+- 改善案: (1) 分割後に、略語・イニシャル（Mr.／Mrs.／Dr.／Prof.／e.g.／i.e.／U.S.／単独大文字1字など）で終わる断片を次の断片と再結合する、(2) 保護トークン＋ピリオド（URL の文末ピリオド）で終わる断片は略語と誤認しない（トークン末尾の `Z.` がイニシャルに見えるため。初版で既存テスト `test_split_url_sentence_final_period` が実際に失敗し、この除外を追加した）。
+- 実装: 上記 (1)(2) を実装。
+- 動作確認: 全テスト76件（従来74＋新規2）を3回とも成功。`py_compile` 成功。実モデル検証は未実施。
+- 残課題: 文末が本当に `etc.` で終わる文と次の文は結合されてしまう（フォーマル文では稀で、実害は分割ミスより小さいと判断）。未知の略語（人名の短縮など）は対象外。
+
 - 本ブランチは Draft PR として提出し、マージはユーザーの判断を待つ。ChatGPT側ブランチ `ai/chatgpt/zhtranslate-reliability-20261029` は残存したままで、本作業では触れていない。
 

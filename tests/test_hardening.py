@@ -170,6 +170,28 @@ def test_script_mismatch_hold_with_new_chars(translator):
                for s in result['sentences'] for c in s['checks'])
 
 
+# --- Cycle 6: Latin abbreviations must not split sentences ---
+
+def test_split_abbreviations_not_split():
+    T = AccuracyFirstChineseTranslator
+    assert T.split_sentences('Dr. Smith went to Washington. He stayed there.') == [
+        'Dr. Smith went to Washington.', 'He stayed there.']
+    assert T.split_sentences('Use e.g. this method. It works.') == [
+        'Use e.g. this method.', 'It works.']
+    assert T.split_sentences('J. R. R. Tolkien wrote books. Many read them.') == [
+        'J. R. R. Tolkien wrote books.', 'Many read them.']
+    assert T.split_sentences('The U.S. is large. Canada is too.') == [
+        'The U.S. is large.', 'Canada is too.']
+    assert T.split_sentences('Mr. and Mrs. Smith met Prof. Lee. They talked.') == [
+        'Mr. and Mrs. Smith met Prof. Lee.', 'They talked.']
+
+
+def test_split_normal_sentences_still_split():
+    T = AccuracyFirstChineseTranslator
+    assert T.split_sentences('This is one. This is two!') == ['This is one.', 'This is two!']
+    assert T.split_sentences('今日は晴れ。明日は雨。') == ['今日は晴れ。', '明日は雨。']
+
+
 def test_changed_number_still_holds(translator):
     translator._translate_nllb = lambda *args: ('价格是12.6美元。', 10)
     result = translator.translate_document(
