@@ -5,7 +5,7 @@ import threading
 from flask import Flask, jsonify, render_template, request
 from werkzeug.exceptions import RequestEntityTooLarge
 
-from translator import AccuracyFirstChineseTranslator, InsufficientMemoryError, ModelUnavailableError
+from translator import AccuracyFirstChineseTranslator, EngineRequestError, InsufficientMemoryError, ModelUnavailableError
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 256 * 1024
@@ -33,8 +33,9 @@ def health():
         'ok': True,
         'model_loaded': translator.model_loaded,
         'model_state': translator.model_state,
+        'engine': translator._engine(),
         'memory_limit_mb': translator.memory_limit_mb,
-        'translation_ready': translator.model_loaded,
+        'translation_ready': translator.engine_ready(),
         'busy': translation_lock.locked(),
         'revision': os.getenv('RENDER_GIT_COMMIT', ''),
         'stanza_loaded': sorted(translator.stanza_pipelines.keys()),
@@ -83,6 +84,8 @@ def translate_api():
         return jsonify({'error': str(exc)}), 400
     except InsufficientMemoryError as exc:
         return jsonify({'error': str(exc), 'code': 'INSUFFICIENT_MEMORY'}), 503
+    except EngineRequestError as exc:
+        return jsonify({'error': str(exc), 'code': 'ENGINE_REQUEST_FAILED'}), 503
     except ModelUnavailableError:
         app.logger.exception('Translation model could not be loaded')
         return jsonify({
