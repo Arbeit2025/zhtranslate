@@ -109,13 +109,21 @@ NUMBER_RE = re.compile(r'(?<![0-9A-Za-z])[+-]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.
 # for extraction only.
 _NUMBER_NORMALIZE = str.maketrans('０１２３４５６７８９．，％＋－', '0123456789.,%+-')
 TOKEN_RE = re.compile(r'ZZ(?:PROT|TERM|TECH)\d+ZZ')
+# A Latin sentence split must not happen right after an abbreviation or
+# an initial: "Dr. Smith ..." and "Use e.g. this ..." were split into
+# fragments that were then translated as separate sentences.
+_ABBREV_END_RE = re.compile(r'(?:[A-Z]\.|(?:Mr|Mrs|Ms|Dr|St|Prof|Fig|vs|etc|No|e\.g|i\.e|a\.m|p\.m|U\.S\.A|U\.S|U\.K)\.)$')
 HAN_RE = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]')
 # Do NOT use \b here: in Python re, CJK kana/kanji are \w, so there is
 # no word boundary between e.g. "OpenAI" and a following "は". With \b
 # the pattern matched nothing in "OpenAIはGPT4とHTML5を使用する。"
 # and the preservation check silently never ran. ASCII-only
 # lookarounds treat any non-ASCII character as a boundary instead.
-TECH_TOKEN_RE = re.compile(r'(?<![A-Za-z0-9])(?:[A-Z]{2,}[A-Z0-9.-]*|[A-Z][a-z]+[A-Z][A-Za-z0-9]*|[A-Za-z]+\d+[A-Za-z0-9.-]*|\d+[A-Za-z][A-Za-z0-9.-]*)(?![A-Za-z0-9])')
+# In addition to the capitalized/digit forms, protect language names with
+# symbols (C++, C#) and file names (translator.py, Node.js): both are
+# literal strings a model must copy verbatim, and neither matched the
+# classic patterns ("Node" has no second capital, "C++" is one letter).
+TECH_TOKEN_RE = re.compile(r'(?<![A-Za-z0-9_])(?:C\+\+|C#|[A-Za-z0-9_-]+\.(?:py|js|ts|jsx|tsx|json|md|mdx|html|css|ya?ml|toml|txt|xml|csv|sh)(?![A-Za-z0-9])|[A-Z]{2,}[A-Z0-9.-]*|[A-Z][a-z]+[A-Z][A-Za-z0-9]*|[A-Za-z]+\d+[A-Za-z0-9.-]*|\d+[A-Za-z][A-Za-z0-9.-]*)(?![A-Za-z0-9])')
 
 # Characters that exist only in one script (unambiguous pairs only;
 # shared / ambiguous forms such as 台, 干, 发's counterpart readings
@@ -180,6 +188,7 @@ class AccuracyFirstChineseTranslator:
         if self._insufficient_model_memory():
             self.model_state = 'insufficient_memory'
         self.stanza_pipelines: Dict[str, object] = {}
+        self.stanza_unavailable: set = set()
         self.opencc_converters: Dict[str, object] = {}
 
     def _insufficient_model_memory(self) -> bool:
@@ -239,6 +248,13 @@ class AccuracyFirstChineseTranslator:
     def _load_stanza(self, lang: str) -> bool:
         if lang in self.stanza_pipelines:
             return True
+        # A failed load used to be retried for every sentence of a
+        # document (import + pipeline construction each time), which
+        # could dominate the runtime of a long translation. Remember
+        # real load failures for the life of this process; configuration
+        # refusals (DISABLE_STANZA / memory guard below) are not cached.
+        if lang in self.stanza_unavailable:
+            return False
         if os.getenv('DISABLE_STANZA') == '1':
             return False
         if self.memory_limit_mb is not None and self.memory_limit_mb < 2048:
@@ -258,6 +274,7 @@ class AccuracyFirstChineseTranslator:
                 )
             except Exception:
                 if os.getenv('AUTO_DOWNLOAD_STANZA', '0') != '1':
+                    self.stanza_unavailable.add(lang)
                     return False
                 stanza.download(lang, verbose=False)
                 pipe = stanza.Pipeline(
@@ -270,6 +287,7 @@ class AccuracyFirstChineseTranslator:
             self.stanza_pipelines[lang] = pipe
             return True
         except Exception:
+            self.stanza_unavailable.add(lang)
             return False
 
     def _opencc(self, config: str):
@@ -311,10 +329,23 @@ class AccuracyFirstChineseTranslator:
             # Split Japanese/Chinese punctuation even with no following space.
             # Latin punctuation splits when followed by whitespace.
             parts = re.split(r'(?<=[。！？!?])|(?<=[.!?])\s+', paragraph)
+            # Re-join fragments that end in an abbreviation / initial;
+            # the whitespace consumed by the split is restored as one space.
+            merged: List[str] = []
             for p in parts:
                 p = p.strip()
-                if p:
-                    out.append(restore(p))
+                if not p:
+                    continue
+                # A part ending in a protection token + '.' (e.g. a URL
+                # restored later) is not an abbreviation: the token's
+                # trailing "Z." would otherwise look like an initial.
+                if (merged and _ABBREV_END_RE.search(merged[-1])
+                        and not re.search(TOKEN_RE.pattern + r'[.!?]?$', merged[-1])):
+                    merged[-1] = merged[-1] + ' ' + p
+                else:
+                    merged.append(p)
+            for p in merged:
+                out.append(restore(p))
         return out or [text]
 
     @staticmethod
@@ -376,9 +407,13 @@ class AccuracyFirstChineseTranslator:
         return ''.join(chunks), mapping
 
     @staticmethod
-    def parse_glossary(text: str) -> Dict[str, str]:
+    def _parse_glossary_detailed(text: str) -> Tuple[Dict[str, str], int]:
         glossary: Dict[str, str] = {}
-        for line in text.splitlines():
+        ignored = 0
+        # Pasted glossaries often carry a BOM or full-width '＝' (Japanese
+        # keyboards). Both used to make lines silently unparseable, so the
+        # glossary quietly did nothing and no check ever fired.
+        for line in text.lstrip('\ufeff').splitlines():
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
@@ -386,11 +421,21 @@ class AccuracyFirstChineseTranslator:
                 src, tgt = line.split('\t', 1)
             elif '=' in line:
                 src, tgt = line.split('=', 1)
+            elif '＝' in line:
+                src, tgt = line.split('＝', 1)
             else:
+                ignored += 1
                 continue
             src, tgt = src.strip(), tgt.strip()
             if src and tgt:
                 glossary[src] = tgt
+            else:
+                ignored += 1
+        return glossary, ignored
+
+    @staticmethod
+    def parse_glossary(text: str) -> Dict[str, str]:
+        glossary, _ignored = AccuracyFirstChineseTranslator._parse_glossary_detailed(text)
         return glossary
 
     @staticmethod
@@ -617,14 +662,21 @@ class AccuracyFirstChineseTranslator:
             checks.append(Check('ok', 'SCRIPT_NORMALIZATION', f'OpenCC {config} で追加変換は不要でした。'))
         return converted, checks
 
-    def _chinese_checks(self, target: str, style: str, target_key: str) -> Tuple[List[Check], dict]:
+    def _chinese_checks(self, target: str, style: str, target_key: str, prose: str = '') -> Tuple[List[Check], dict]:
         checks: List[Check] = []
         analysis = {'sentences': [], 'tokens': [], 'han_count': 0}
 
         han_count = len(HAN_RE.findall(target))
-        nonspace_count = len(re.sub(r'\s+', '', target))
         analysis['han_count'] = han_count
-        if nonspace_count and han_count / nonspace_count < 0.25:
+        # Density is judged on the model's prose, not the final output:
+        # restored literals (long URLs, file paths) are ASCII by design
+        # and used to dilute the ratio into a false REVIEW on perfectly
+        # good Chinese. Non-literal ASCII the model itself produced
+        # stays in `prose`, so real dilution is still caught.
+        density_text = prose if prose.strip() else target
+        density_han = len(HAN_RE.findall(density_text))
+        nonspace_count = len(re.sub(r'\s+', '', density_text))
+        if nonspace_count and density_han / nonspace_count < 0.25:
             checks.append(Check('review', 'CHINESE_DENSITY', '出力中の漢字比率が低めです。固有名詞・記号中心の文でなければ要確認です。'))
         else:
             checks.append(Check('ok', 'CHINESE_DENSITY', '中国語文字を十分に含む出力です。'))
@@ -797,7 +849,7 @@ class AccuracyFirstChineseTranslator:
             checks.append(Check('ok', 'TECH_TOKEN', '検出した英数字の技術名・略語を保持しています。'))
 
         if checked_prose.strip() or normalized_glossary:
-            zh_checks, analysis = self._chinese_checks(target, style, target_key)
+            zh_checks, analysis = self._chinese_checks(target, style, target_key, prose=checked_prose)
             checks.extend(zh_checks)
         else:
             analysis = {'sentences': [], 'tokens': [], 'han_count': 0}
@@ -860,7 +912,7 @@ class AccuracyFirstChineseTranslator:
             src_code = source
             src_label = NLLB_TO_LABEL.get(src_code, src_code)
 
-        glossary = self.parse_glossary(glossary_text)
+        glossary, glossary_ignored = self._parse_glossary_detailed(glossary_text)
         # Preserve paragraph breaks: sentences were previously flattened
         # into one '\n'-joined block, so a multi-paragraph document came
         # back as a single paragraph. Translate paragraph by paragraph;
@@ -879,12 +931,18 @@ class AccuracyFirstChineseTranslator:
 
         if any(r['status'] == 'HOLD' for r in results):
             overall = 'HOLD'
-        elif any(r['status'] == 'REVIEW' for r in results) or auto_detected:
+        elif any(r['status'] == 'REVIEW' for r in results) or auto_detected or glossary_ignored:
             overall = 'REVIEW'
         else:
             overall = 'READY'
 
         document_checks = []
+        if glossary_ignored:
+            document_checks.append({
+                'level': 'review',
+                'code': 'GLOSSARY_FORMAT',
+                'message': f'用語集の {glossary_ignored} 行を解釈できず無視しました。「原語=訳語」「原語＝訳語」またはタブ区切りで入力してください。',
+            })
         if auto_detected:
             document_checks.append({
                 'level': 'review',
