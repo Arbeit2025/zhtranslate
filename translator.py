@@ -188,6 +188,7 @@ class AccuracyFirstChineseTranslator:
         if self._insufficient_model_memory():
             self.model_state = 'insufficient_memory'
         self.stanza_pipelines: Dict[str, object] = {}
+        self.stanza_unavailable: set = set()
         self.opencc_converters: Dict[str, object] = {}
 
     def _insufficient_model_memory(self) -> bool:
@@ -247,6 +248,13 @@ class AccuracyFirstChineseTranslator:
     def _load_stanza(self, lang: str) -> bool:
         if lang in self.stanza_pipelines:
             return True
+        # A failed load used to be retried for every sentence of a
+        # document (import + pipeline construction each time), which
+        # could dominate the runtime of a long translation. Remember
+        # real load failures for the life of this process; configuration
+        # refusals (DISABLE_STANZA / memory guard below) are not cached.
+        if lang in self.stanza_unavailable:
+            return False
         if os.getenv('DISABLE_STANZA') == '1':
             return False
         if self.memory_limit_mb is not None and self.memory_limit_mb < 2048:
@@ -266,6 +274,7 @@ class AccuracyFirstChineseTranslator:
                 )
             except Exception:
                 if os.getenv('AUTO_DOWNLOAD_STANZA', '0') != '1':
+                    self.stanza_unavailable.add(lang)
                     return False
                 stanza.download(lang, verbose=False)
                 pipe = stanza.Pipeline(
@@ -278,6 +287,7 @@ class AccuracyFirstChineseTranslator:
             self.stanza_pipelines[lang] = pipe
             return True
         except Exception:
+            self.stanza_unavailable.add(lang)
             return False
 
     def _opencc(self, config: str):

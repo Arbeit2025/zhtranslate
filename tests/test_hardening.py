@@ -242,6 +242,33 @@ def test_glossary_clean_lines_no_format_warning(translator):
     assert not any(c['code'] == 'GLOSSARY_FORMAT' for c in result['document_checks'])
 
 
+# --- Cycle 9: a failed Stanza load is not retried per sentence ---
+
+def test_stanza_failure_is_cached(monkeypatch):
+    import types
+    calls = {'n': 0}
+    fake_stanza = types.ModuleType('stanza')
+
+    def pipeline(*args, **kwargs):
+        calls['n'] += 1
+        raise RuntimeError('no model files')
+
+    fake_stanza.Pipeline = pipeline
+    fake_stanza.download = lambda *a, **k: None
+    fake_torch = types.ModuleType('torch')
+    fake_torch.cuda = types.SimpleNamespace(is_available=lambda: False)
+    monkeypatch.setitem(sys.modules, 'stanza', fake_stanza)
+    monkeypatch.setitem(sys.modules, 'torch', fake_torch)
+    monkeypatch.delenv('DISABLE_STANZA', raising=False)
+    monkeypatch.setenv('AUTO_DOWNLOAD_STANZA', '0')
+    t = AccuracyFirstChineseTranslator()
+    t.memory_limit_mb = None
+    assert t._load_stanza('zh-hans') is False
+    assert t._load_stanza('zh-hans') is False
+    assert t._load_stanza('zh-hans') is False
+    assert calls['n'] == 1
+
+
 def test_changed_number_still_holds(translator):
     translator._translate_nllb = lambda *args: ('价格是12.6美元。', 10)
     result = translator.translate_document(
