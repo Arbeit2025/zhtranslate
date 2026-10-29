@@ -18,11 +18,11 @@ NLLB の `zho_Hans` / `zho_Hant` で基礎翻訳し、必要に応じて OpenCC 
 ```text
 source text
   -> source-language selection / detection
-  -> sentence segmentation
-  -> Wiki markup / URL / glossary protection
-  -> direct NLLB translation -> zho_Hans / zho_Hant
+  -> Wiki markup / URL protection before sentence segmentation
+  -> glossary / technical-name protection (one key per occurrence)
+  -> NLLB translation of prose spans -> zho_Hans / zho_Hant
   -> OpenCC script / regional normalization
-  -> protected-token + number + technical-token checks
+  -> literal restoration, then preservation / number / technical-token checks
   -> Chinese Stanza POS / lemma / dependency parse
   -> register / punctuation / output-shape checks
   -> optional Chinese -> source back-translation
@@ -59,6 +59,19 @@ python app.py
 
 初回は NLLB と Stanza の中国語モデルを取得するため、大きな通信が発生します。
 
+### 起動しない・翻訳が終わらない場合
+
+画面表示と翻訳モデルの準備は別です。`/api/health` の `ok: true` はHTTPプロセスの稼働を表し、`translation_ready` / `model_loaded` が実モデルの読込完了を表します。モデルは最初の翻訳時に読み込みます。`model_state` は `not_loaded / loading / ready / error / insufficient_memory`、`busy` は処理中、`memory_limit_mb` は検出できたメモリ上限、`revision` はRenderが設定した公開コミットです。中国語同士の表記変換にはNLLBを使いません。
+
+- 依存関係導入後、**アプリと同じユーザー・モデル保存先**で `python scripts/setup_models.py` を実行してください。`MT_MODEL` を設定している場合はセットアップにも同じ値を使用します。
+- NLLBは600Mパラメータのモデルです。FP32の重みだけで約2.4GBあり、実行時はさらにPython・生成処理・Stanzaのメモリが必要です。512MBの環境には収まりません。複数のワーカーで同じモデルをロードしない構成にしてください。
+- モデルが読み込めなければAPIは `503 MODEL_UNAVAILABLE` を返します。通信・空きメモリ・キャッシュ配置を確認してください。OSによるメモリ不足の強制終了はPythonでは捕捉できず、公開先のログ確認が必要です。
+- 既定のNLLBモデルで検出したメモリ上限が3GiB未満の場合は、重いライブラリの読み込み前に `503 INSUFFICIENT_MEMORY` を返してプロセスの強制終了を避けます。これは最低限のガードで、3GiBなら十分という動作保証ではありません。2GiB未満の環境ではStanzaも読み込まず、中国語同士の表記変換を `REVIEW` で提供します。
+- Stanzaは事前ダウンロードを基本とし、リクエスト中の自動ダウンロードは既定で無効です。有効にする場合だけ `AUTO_DOWNLOAD_STANZA=1` を指定してください。解析器が使えなければ `REVIEW` として表示します。
+- 同時翻訳は1件ずつ処理します。処理中に別の翻訳を送ると `429 BUSY` です。原文と用語集は各20,000文字まで受け付けます。
+
+Renderなどで `python app.py` を起動する場合、`PORT` が設定されていれば `0.0.0.0` で待ち受けます。ローカルでは既定で `127.0.0.1`、必要なら `HOST` で指定できます。既存の `gunicorn app:app` 起動では `gunicorn.conf.py` が自動適用され、`0.0.0.0:$PORT`、ワーカー1個・4スレッド・タイムアウト300秒になります。
+
 ## Accuracy features
 
 ### 1. Direct multilingual -> Chinese
@@ -93,6 +106,8 @@ OpenCC は翻訳モデルではなく、簡繁字・異体字・地域用語の�
 - ユーザー固定用語集（最終出力に指定訳語がなければ `HOLD`）
 - `OpenAI`, `HTML5`, `GPT4` のような英数字技術名・固有名詞の消失（日本語に隣接していても検出し、消失は `HOLD`）
 
+保護対象や用語集の内部トークンをNLLBにそのままコピーさせる方式は使いません。本文の区間だけを翻訳し、表記変換後にURL・Wiki記法・技術名をそのまま復元します。ネストしたテンプレートと内部トークンに似た原文も保持します。用語集は出現ごとに扱い、中国語訳語を指定した簡繁字へ正規化します。分割翻訳では前後の語順・文脈が不自然になる場合があるため、`SEGMENTED_TRANSLATION` の `REVIEW` を必ず付けます。Wiki構文全般の完全対応や意味の完全保存を保証するものではありません。
+
 ### 5. Chinese-side parser
 
 Stanza の `zh-hans` / `zh-hant` と `tokenize,pos,lemma,depparse` を使います。依存構造 root が得られるかを確認しますが、構文解析成功だけで文法的正しさを認定しません。
@@ -122,9 +137,11 @@ OpenCC は Apache-2.0 で、Python API と中国大陸・台湾・香港向け�
 モデルをロードしない軽量検査（pytest は開発用依存関係として requirements-dev.txt に分離しています）:
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements-test.txt
 pytest -q
 ```
+
+この軽量テストは実OpenCC・Flaskと、翻訳出力の故障注入を使い、モデル本体の翻訳精度は検証しません。GitHub Actionsでも同じテストを実行します。実モデルを含む確認は `requirements-dev.txt` とモデルを準備した上で、`python scripts/verify_models.py --repeat 3 --output model-verification.json` を実行してください。
 
 ## Next candidates
 

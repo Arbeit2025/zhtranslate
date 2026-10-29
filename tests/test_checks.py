@@ -55,6 +55,10 @@ def test_technical_tokens_cjk_adjacent():
 def _stub_translator(output):
     inst = AccuracyFirstChineseTranslator()
     inst._translate_nllb = lambda text, src, tgt: (output, 10)
+    # Inject corruption AFTER protected-span assembly to verify the final
+    # safety checks, independently of the model's copying behavior.
+    inst._translate_preserving = lambda text, mapping, src, tgt: (output, 10)
+    inst._load_stanza = lambda lang: False
     return inst
 
 

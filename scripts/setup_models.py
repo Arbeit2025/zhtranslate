@@ -1,7 +1,8 @@
+import os
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 import stanza
 
-MODEL = 'facebook/nllb-200-distilled-600M'
+MODEL = os.getenv('MT_MODEL', 'facebook/nllb-200-distilled-600M')
 
 print('Downloading NLLB tokenizer/model...')
 AutoTokenizer.from_pretrained(MODEL)
