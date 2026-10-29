@@ -279,3 +279,36 @@ def test_changed_number_still_holds(translator):
         c['code'] == 'NUMBER_PRESERVATION' and c['level'] == 'hold'
         for s in result['sentences'] for c in s['checks']
     )
+
+
+# --- Cycle 10: restored literals must not dilute the han-density check ---
+
+def test_long_url_does_not_false_review_density(translator):
+    translator._translate_nllb = lambda text, *a: ('请看详情。', 5)
+    result = translator.translate_document(
+        '詳細は https://example.com/very/long/path/segment/segment を見てください。',
+        source='jpn_Jpan', run_backtranslation=False,
+    )
+    assert 'https://example.com/very/long/path/segment/segment' in result['translation']
+    assert not any(
+        c['code'] == 'CHINESE_DENSITY' and c['level'] == 'review'
+        for s in result['sentences'] for c in s['checks']
+    )
+
+
+def test_real_low_density_still_reviews(translator):
+    # ASCII the model itself produced (not a restored literal) must
+    # still trip the density check.
+    translator._translate_nllb = lambda text, *a: ('this is mostly english output here', 5)
+    result = translator.translate_document(
+        'これはテストです。', source='jpn_Jpan', run_backtranslation=False,
+    )
+    assert any(
+        c['code'] == 'CHINESE_DENSITY' and c['level'] == 'review'
+        for s in result['sentences'] for c in s['checks']
+    )
+
+
+def test_density_falls_back_to_target_without_prose(translator):
+    checks, _analysis = translator._chinese_checks('你好世界，这是一个测试句子。', 'plain', 'cn')
+    assert any(c.code == 'CHINESE_DENSITY' and c.level == 'ok' for c in checks)

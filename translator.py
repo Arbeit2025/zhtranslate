@@ -662,14 +662,21 @@ class AccuracyFirstChineseTranslator:
             checks.append(Check('ok', 'SCRIPT_NORMALIZATION', f'OpenCC {config} で追加変換は不要でした。'))
         return converted, checks
 
-    def _chinese_checks(self, target: str, style: str, target_key: str) -> Tuple[List[Check], dict]:
+    def _chinese_checks(self, target: str, style: str, target_key: str, prose: str = '') -> Tuple[List[Check], dict]:
         checks: List[Check] = []
         analysis = {'sentences': [], 'tokens': [], 'han_count': 0}
 
         han_count = len(HAN_RE.findall(target))
-        nonspace_count = len(re.sub(r'\s+', '', target))
         analysis['han_count'] = han_count
-        if nonspace_count and han_count / nonspace_count < 0.25:
+        # Density is judged on the model's prose, not the final output:
+        # restored literals (long URLs, file paths) are ASCII by design
+        # and used to dilute the ratio into a false REVIEW on perfectly
+        # good Chinese. Non-literal ASCII the model itself produced
+        # stays in `prose`, so real dilution is still caught.
+        density_text = prose if prose.strip() else target
+        density_han = len(HAN_RE.findall(density_text))
+        nonspace_count = len(re.sub(r'\s+', '', density_text))
+        if nonspace_count and density_han / nonspace_count < 0.25:
             checks.append(Check('review', 'CHINESE_DENSITY', '出力中の漢字比率が低めです。固有名詞・記号中心の文でなければ要確認です。'))
         else:
             checks.append(Check('ok', 'CHINESE_DENSITY', '中国語文字を十分に含む出力です。'))
@@ -842,7 +849,7 @@ class AccuracyFirstChineseTranslator:
             checks.append(Check('ok', 'TECH_TOKEN', '検出した英数字の技術名・略語を保持しています。'))
 
         if checked_prose.strip() or normalized_glossary:
-            zh_checks, analysis = self._chinese_checks(target, style, target_key)
+            zh_checks, analysis = self._chinese_checks(target, style, target_key, prose=checked_prose)
             checks.extend(zh_checks)
         else:
             analysis = {'sentences': [], 'tokens': [], 'han_count': 0}
