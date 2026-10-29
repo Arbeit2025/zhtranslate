@@ -98,7 +98,13 @@ PROTECT_PATTERNS = [
     r'ZZ(?:PROT|TERM|TECH)\d+ZZ',
 ]
 
-NUMBER_RE = re.compile(r'(?<![0-9A-Za-z])[+-]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?%?(?!\d)')
+NUMBER_RE = re.compile(r'(?<![0-9A-Za-z])[+-]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?(?:\s*%)?(?!\d)')
+# Japanese text often mixes full-width digits / punctuation (２０２６年,
+# １２．５％). \d matches the digits, but ． and ％ do not match [.,%], so a
+# full-width number was extracted in pieces and then failed the preservation
+# comparison against a half-width translation. Normalize a copy of the text
+# for extraction only.
+_NUMBER_NORMALIZE = str.maketrans('０１２３４５６７８９．，％＋－', '0123456789.,%+-')
 TOKEN_RE = re.compile(r'ZZ(?:PROT|TERM|TECH)\d+ZZ')
 HAN_RE = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]')
 # Do NOT use \b here: in Python re, CJK kana/kanji are \w, so there is
@@ -450,8 +456,29 @@ class AccuracyFirstChineseTranslator:
         return round(100.0 * SequenceMatcher(None, a, b).ratio(), 1)
 
     @staticmethod
-    def _numbers(text: str) -> List[str]:
-        return NUMBER_RE.findall(text)
+    def _canonical_number(raw: str) -> str:
+        """Canonical form for comparison: 10,000 / 10000, 12.50 / 12.5 and
+        12.5% / 12.5 % are the same number; 12.5 vs 12.6 still differ."""
+        from decimal import Decimal, InvalidOperation
+        percent = raw.rstrip().endswith('%')
+        s = re.sub(r'\s+', '', raw).rstrip('%')
+        try:
+            if re.fullmatch(r'[+-]?\d{1,3}([.,]\d{3})+', s):
+                s = re.sub(r'[.,]', '', s)  # pure thousands grouping
+            elif ',' in s and '.' in s:
+                s = s.replace(',', '')  # 1,234.5 style
+            elif s.count(',') == 1 and '.' not in s:
+                s = s.replace(',', '.')  # decimal comma: 1,5
+            elif ',' in s:
+                s = s.replace(',', '')
+            value = Decimal(s)
+        except InvalidOperation:
+            return raw
+        return format(value.normalize(), 'f') + ('%' if percent else '')
+
+    @classmethod
+    def _numbers(cls, text: str) -> List[str]:
+        return [cls._canonical_number(m) for m in NUMBER_RE.findall(text.translate(_NUMBER_NORMALIZE))]
 
     @staticmethod
     def _technical_tokens(text: str) -> List[str]:
