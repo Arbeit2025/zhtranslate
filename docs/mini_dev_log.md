@@ -65,6 +65,7 @@
 
 - ベースライン56件 → 最終74件（新規18件）、各サイクルで全件を3回成功。
 - 変更ファイル: `translator.py`、`tests/test_hardening.py`（新規）、`README.md`、`docs/mini_dev_log.md`（新規・本ファイル）。
-- 未実施・未確認: 実モデル（NLLB）での実翻訳検証、公開先（Render）への反映確認（ChatGPT側 PR #2 の残件「公開先への反映後は別途確認します」は本作業でも未実施のまま）、GitHub Actions（tests.yml）の実行結果。
+- 未実施・未確認: 実モデル（NLLB）での実翻訳検証、GitHub Actions（tests.yml）の実行結果。
+- 公開先（Render）の反映確認（ChatGPT側 PR #2 の残件）: 2026-10-29 16:34 JST に `https://zhtranslate.onrender.com/api/health` を読み取りのみで確認した。`ok: true`、`revision` は main と一致する `f33bb4e24f9266aabba5d0ca7acd6dbdc38c8787`、`memory_limit_mb: 512`、`model_state: insufficient_memory`、`translation_ready: false` で、PR #2 の設計どおり「512MB 環境では NLLB 翻訳は 503 で理由を返し、中国語同士の表記変換のみ提供」が公開先でも成立していることを確認した。公開先での実際の翻訳リクエスト送信は行っていない。本ブランチ（PR #3）の内容は当然まだ公開先に反映されていない。
 - 本ブランチは Draft PR として提出し、マージはユーザーの判断を待つ。ChatGPT側ブランチ `ai/chatgpt/zhtranslate-reliability-20261029` は残存したままで、本作業では触れていない。
 
