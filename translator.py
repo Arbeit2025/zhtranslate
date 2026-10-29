@@ -119,7 +119,11 @@ HAN_RE = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]')
 # the pattern matched nothing in "OpenAIはGPT4とHTML5を使用する。"
 # and the preservation check silently never ran. ASCII-only
 # lookarounds treat any non-ASCII character as a boundary instead.
-TECH_TOKEN_RE = re.compile(r'(?<![A-Za-z0-9])(?:[A-Z]{2,}[A-Z0-9.-]*|[A-Z][a-z]+[A-Z][A-Za-z0-9]*|[A-Za-z]+\d+[A-Za-z0-9.-]*|\d+[A-Za-z][A-Za-z0-9.-]*)(?![A-Za-z0-9])')
+# In addition to the capitalized/digit forms, protect language names with
+# symbols (C++, C#) and file names (translator.py, Node.js): both are
+# literal strings a model must copy verbatim, and neither matched the
+# classic patterns ("Node" has no second capital, "C++" is one letter).
+TECH_TOKEN_RE = re.compile(r'(?<![A-Za-z0-9_])(?:C\+\+|C#|[A-Za-z0-9_-]+\.(?:py|js|ts|jsx|tsx|json|md|mdx|html|css|ya?ml|toml|txt|xml|csv|sh)(?![A-Za-z0-9])|[A-Z]{2,}[A-Z0-9.-]*|[A-Z][a-z]+[A-Z][A-Za-z0-9]*|[A-Za-z]+\d+[A-Za-z0-9.-]*|\d+[A-Za-z][A-Za-z0-9.-]*)(?![A-Za-z0-9])')
 
 # Characters that exist only in one script (unambiguous pairs only;
 # shared / ambiguous forms such as 台, 干, 发's counterpart readings

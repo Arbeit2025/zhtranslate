@@ -192,6 +192,33 @@ def test_split_normal_sentences_still_split():
     assert T.split_sentences('今日は晴れ。明日は雨。') == ['今日は晴れ。', '明日は雨。']
 
 
+# --- Cycle 7: filenames and symbol language names are technical tokens ---
+
+def test_technical_tokens_filenames_and_symbols():
+    T = AccuracyFirstChineseTranslator
+    assert T._technical_tokens('translator.pyとapp.py、Node.jsとC++を使う') == [
+        'translator.py', 'app.py', 'Node.js', 'C++']
+    assert T._technical_tokens('C#とconfig.yaml、README.mdを読む') == ['C#', 'config.yaml', 'README.md']
+    assert T._technical_tokens('The capital of China is Beijing.') == []
+
+
+def test_filenames_and_symbols_survive_translation(translator):
+    seen = []
+
+    def model(text, src, tgt):
+        seen.append(text)
+        return '使用它。', 4
+
+    translator._translate_nllb = model
+    result = translator.translate_document(
+        'translator.pyでC++を使う。', source='jpn_Jpan', run_backtranslation=False)
+    assert 'translator.py' in result['translation']
+    assert 'C++' in result['translation']
+    assert seen and all('translator.py' not in t and 'C++' not in t for t in seen)
+    assert not any(c['code'] == 'TECH_TOKEN' and c['level'] == 'hold'
+                   for s in result['sentences'] for c in s['checks'])
+
+
 def test_changed_number_still_holds(translator):
     translator._translate_nllb = lambda *args: ('价格是12.6美元。', 10)
     result = translator.translate_document(
