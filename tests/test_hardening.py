@@ -115,6 +115,32 @@ def test_tech_protection_skips_spans_containing_tokens(translator):
     assert protected == 'ZZTERM0001ZZDS' and mapping == {}
 
 
+# --- Cycle 4: email addresses are protected like URLs ---
+
+def test_email_is_protected():
+    from translator import PROTECT_PATTERNS
+    _protected, mapping = AccuracyFirstChineseTranslator._protect(
+        '連絡は first.last+tag@sub.example.co.jp まで。', 'PROT', PROTECT_PATTERNS)
+    assert 'first.last+tag@sub.example.co.jp' in mapping.values()
+
+
+def test_email_never_reaches_model_and_is_preserved(translator):
+    seen = []
+
+    def model(text, src, tgt):
+        seen.append(text)
+        return '译文。', 4
+
+    translator._translate_nllb = model
+    result = translator.translate_document(
+        '連絡は contact@example.com までお願いします。',
+        source='jpn_Jpan', run_backtranslation=False,
+    )
+    assert 'contact@example.com' in result['translation']
+    assert seen and all('@' not in text for text in seen)
+    assert result['status'] != 'HOLD'
+
+
 def test_changed_number_still_holds(translator):
     translator._translate_nllb = lambda *args: ('价格是12.6美元。', 10)
     result = translator.translate_document(

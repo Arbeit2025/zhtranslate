@@ -89,6 +89,9 @@ PROTECT_PATTERNS = [
     # Preserve Unicode paths and query strings; stop at surrounding CJK
     # punctuation, whitespace, markup, or quotes.
     r'https?://[^\s<>\{\}"\'，。！？、；：]+',
+    # Email addresses are literal strings like URLs: a model must never
+    # translate, transliterate or drop them, so protect them the same way.
+    r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}',
     r'<ref\b[^>]*>[\s\S]*?</ref>',
     r'<ref\b[^>]*/>',
     r'</?ref\b[^>]*>',
