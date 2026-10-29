@@ -141,6 +141,35 @@ def test_email_never_reaches_model_and_is_preserved(translator):
     assert result['status'] != 'HOLD'
 
 
+# --- Cycle 5: script-residual coverage for frequent simplified chars ---
+
+def test_residuals_cover_frequent_simplified_chars():
+    assert AccuracyFirstChineseTranslator._script_residuals('让人们认识这条河边', 'tw') == sorted(set('让们认识这条边'))
+    assert AccuracyFirstChineseTranslator._script_residuals('这个价格很贵', 'hk') == sorted(set('这个价贵'))
+    assert AccuracyFirstChineseTranslator._script_residuals('讓人們認識這條河邊', 'tw') == []
+    assert AccuracyFirstChineseTranslator._script_residuals('讓人們認識這條河邊', 'cn') == sorted(set('們條認識讓這邊'))
+
+
+def test_residual_pairs_are_opencc_consistent():
+    import opencc
+    from translator import SIMPLIFIED_ONLY_CHARS, TRADITIONAL_ONLY_CHARS
+    s2t = opencc.OpenCC('s2t.json')
+    t2s = opencc.OpenCC('t2s.json')
+    assert not (SIMPLIFIED_ONLY_CHARS & TRADITIONAL_ONLY_CHARS)
+    for ch in SIMPLIFIED_ONLY_CHARS:
+        trad = s2t.convert(ch)
+        assert len(trad) == 1 and trad != ch and t2s.convert(trad) == ch, ch
+
+
+def test_script_mismatch_hold_with_new_chars(translator):
+    translator._opencc = lambda config: None  # normalization unavailable
+    translator._translate_nllb = lambda *args: ('让人们认识这个软件', 10)
+    result = translator.translate_document('人々がこのソフトを知る。', source='jpn_Jpan', target='tw', run_backtranslation=False)
+    assert result['status'] == 'HOLD'
+    assert any(c['code'] == 'SCRIPT_MISMATCH' and c['level'] == 'hold'
+               for s in result['sentences'] for c in s['checks'])
+
+
 def test_changed_number_still_holds(translator):
     translator._translate_nllb = lambda *args: ('价格是12.6美元。', 10)
     result = translator.translate_document(

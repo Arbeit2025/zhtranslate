@@ -126,11 +126,20 @@ SIMPLIFIED_ONLY_CHARS = frozenset(
     '国学学习汉语测试简体个们为这对时间过还进远运长门问关开闭现点电车马龙风云热气压产业业务经经济历乐书画写读说话认记视声响图区医员场园县镇户务动劳团战争军'
     '软网络数应术据库脑头湾转达标备设计机统选页内显错确译论证评议题导师级'
     '习题录频药响'
+    # 2026-10-29 expansion (cycle 5): every pair below was verified with
+    # OpenCC (s2t converts the simplified char to a single different
+    # character and t2s converts it back). Deliberately ambiguous forms
+    # (发, 复, 余, 后, 吃, 叶, 于 and similar, which also occur in
+    # Traditional text) were nominated but excluded.
+    '让给识边条亲观质买断续际难虽够态价众优坏严丰丽举么义乌乔乡乱亏亚亩亿仅从仑仓仪伦伟传伤伪佣侠侣侥侦侧侨俭债倾偿储儿兑兰兴养兽册农冯决况冻净凉减凑凤凭凯击凿刘则刚创删别剂刹剑劝办励劲势勋匀协单卖卢卤卧卫厂厅厉厌双变叙叠号叹吗听启吴吕贪贫货贩购贮贯贴贵贱贷贸费贺贼贾贿赂赁赊赋赌赎赏赐赔赖赚赛赠赞赢赃实宠审宽尔属层岛岭币帅帐帮带宾宫寿尝届屡巩帜帧庆庞庙苏苹茧荧获营萤萧萨葱蒋蓝蓟蔼藓'
 )
 TRADITIONAL_ONLY_CHARS = frozenset(
     '國學學習漢語測試簡體個們為這對時間過還進遠運長門問關開閉現點電車馬龍風雲熱氣壓產業務經經濟歷樂書畫寫讀說話認記視聲響圖區醫員場園縣鎮戶務動勞團戰爭軍'
     '軟網絡數應術據庫腦頭灣轉達標備設計機統選頁內顯錯確譯論證評議題導師級'
     '習題錄頻藥響'
+    # Traditional counterparts of the cycle-5 expansion above, in the
+    # same order, verified the same way.
+    '讓給識邊條親觀質買斷續際難雖夠態價衆優壞嚴豐麗舉麼義烏喬鄉亂虧亞畝億僅從侖倉儀倫偉傳傷僞傭俠侶僥偵側僑儉債傾償儲兒兌蘭興養獸冊農馮決況凍淨涼減湊鳳憑凱擊鑿劉則剛創刪別劑剎劍勸辦勵勁勢勳勻協單賣盧滷臥衛廠廳厲厭雙變敘疊號嘆嗎聽啓吳呂貪貧貨販購貯貫貼貴賤貸貿費賀賊賈賄賂賃賒賦賭贖賞賜賠賴賺賽贈贊贏贓實寵審寬爾屬層島嶺幣帥帳幫帶賓宮壽嘗屆屢鞏幟幀慶龐廟蘇蘋繭熒獲營螢蕭薩蔥蔣藍薊藹蘚'
 )
 
 
