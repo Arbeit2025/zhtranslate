@@ -64,6 +64,7 @@ python app.py
 画面表示と翻訳モデルの準備は別です。`/api/health` の `ok: true` はHTTPプロセスの稼働を表し、`translation_ready` / `model_loaded` が実モデルの読込完了を表します。モデルは最初の翻訳時に読み込みます。`model_state` は `not_loaded / loading / ready / error / insufficient_memory`、`busy` は処理中、`memory_limit_mb` は検出できたメモリ上限、`revision` はRenderが設定した公開コミットです。中国語同士の表記変換にはNLLBを使いません。
 
 - 依存関係導入後、**アプリと同じユーザー・モデル保存先**で `python scripts/setup_models.py` を実行してください。`MT_MODEL` を設定している場合はセットアップにも同じ値を使用します。
+- 翻訳エンジンは環境変数で切り替えられます。既定はローカルの NLLB です。`AZURE_TRANSLATOR_KEY` を設定すると（または `MT_ENGINE=azure` を明示すると）Azure Translator のホスト型 API を使うため、512MB の環境でも実翻訳が可能です（F0 無料枠は月2M文字。逆翻訳チェックも同じエンジンを使うため消費は約2倍になります）。リージョン付きリソースでは `AZURE_TRANSLATOR_REGION`、エンドポイントを変える場合は `AZURE_TRANSLATOR_ENDPOINT` も設定してください。`/api/health` の `engine` が `azure`、`model_state` が `api_ready` になれば有効です。Azure 利用時はモデル用ライブラリが不要なため、軽量な `requirements-api.txt`（Flask / langid / OpenCC のみ）でもデプロイできます。この場合 Stanza は使えず、中国語チェックは `REVIEW`（未実行）として表示されます。
 - NLLBは600Mパラメータのモデルです。FP32の重みだけで約2.4GBあり、実行時はさらにPython・生成処理・Stanzaのメモリが必要です。512MBの環境には収まりません。複数のワーカーで同じモデルをロードしない構成にしてください。
 - モデルが読み込めなければAPIは `503 MODEL_UNAVAILABLE` を返します。通信・空きメモリ・キャッシュ配置を確認してください。OSによるメモリ不足の強制終了はPythonでは捕捉できず、公開先のログ確認が必要です。
 - 既定のNLLBモデルで検出したメモリ上限が3GiB未満の場合は、重いライブラリの読み込み前に `503 INSUFFICIENT_MEMORY` を返してプロセスの強制終了を避けます。これは最低限のガードで、3GiBなら十分という動作保証ではありません。2GiB未満の環境ではStanzaも読み込まず、中国語同士の表記変換を `REVIEW` で提供します。

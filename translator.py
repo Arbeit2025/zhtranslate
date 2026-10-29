@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 import re
+import urllib.error
+import urllib.request
 from collections import Counter
 from dataclasses import dataclass, asdict
 from difflib import SequenceMatcher
@@ -78,6 +81,12 @@ MANUAL_CHINESE_SOURCES = [
 ]
 NLLB_TO_LABEL = {v[0]: v[1] for v in LANGS.values()}
 NLLB_TO_LABEL['zho_Hans'] = '中文（简体字）'
+
+# FLORES code -> Azure Translator language code. The ISO codes in LANGS
+# match Azure's codes as-is, except Chinese, which Azure splits into
+# zh-Hans / zh-Hant.
+_AZURE_LANG: Dict[str, str] = {code: iso for iso, (code, _label) in LANGS.items()}
+_AZURE_LANG.update({'zho_Hans': 'zh-Hans', 'zho_Hant': 'zh-Hant'})
 NLLB_TO_LABEL['zho_Hant'] = '中文（繁體字）'
 
 FORMAL_WARN_WORDS = {
@@ -166,6 +175,10 @@ class InsufficientMemoryError(ModelUnavailableError):
     """Known runtime limit cannot hold the default NLLB model."""
 
 
+class EngineRequestError(ModelUnavailableError):
+    """Hosted translation engine request failed; the message is user-facing."""
+
+
 def memory_limit_mb() -> int | None:
     limits = []
     for path in ('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes'):
@@ -187,12 +200,36 @@ class AccuracyFirstChineseTranslator:
         self.memory_limit_mb = memory_limit_mb()
         if self._insufficient_model_memory():
             self.model_state = 'insufficient_memory'
+        if self._engine() == 'azure':
+            self.model_state = 'api_ready' if os.getenv('AZURE_TRANSLATOR_KEY') else 'api_unconfigured'
         self.stanza_pipelines: Dict[str, object] = {}
         self.stanza_unavailable: set = set()
         self.opencc_converters: Dict[str, object] = {}
 
+    @staticmethod
+    def _engine() -> str:
+        """Translation engine: 'azure' (hosted API) or 'nllb' (local model).
+
+        MT_ENGINE wins when set; otherwise the presence of an Azure key
+        selects Azure. Local NLLB stays the default so existing local /
+        development setups are unchanged.
+        """
+        engine = os.getenv('MT_ENGINE', '').strip().lower()
+        if engine in {'azure', 'nllb'}:
+            return engine
+        return 'azure' if os.getenv('AZURE_TRANSLATOR_KEY') else 'nllb'
+
+    def _engine_name(self) -> str:
+        return 'azure-translator' if self._engine() == 'azure' else MODEL_NAME
+
+    def engine_ready(self) -> bool:
+        if self._engine() == 'azure':
+            return bool(os.getenv('AZURE_TRANSLATOR_KEY'))
+        return self.model_loaded
+
     def _insufficient_model_memory(self) -> bool:
-        return (MODEL_NAME == 'facebook/nllb-200-distilled-600M'
+        return (self._engine() == 'nllb'
+                and MODEL_NAME == 'facebook/nllb-200-distilled-600M'
                 and self.memory_limit_mb is not None and self.memory_limit_mb < 3072)
 
     @staticmethod
@@ -496,7 +533,7 @@ class AccuracyFirstChineseTranslator:
         This can reduce fluency, so the caller adds a REVIEW for split prose.
         """
         if not mapping:
-            return self._translate_nllb(text, src, tgt)
+            return self._translate_engine(text, src, tgt)
         pattern = re.compile('(' + '|'.join(re.escape(k) for k in mapping) + ')')
         output, token_count = [], 0
         for part in pattern.split(text):
@@ -505,7 +542,7 @@ class AccuracyFirstChineseTranslator:
             if part in mapping or not re.search(r'[^\W\d_]|\d', part, re.UNICODE):
                 output.append(part)
                 continue
-            translated, count = self._translate_nllb(part.strip(), src, tgt)
+            translated, count = self._translate_engine(part.strip(), src, tgt)
             if not translated.strip():
                 raise ValueError('翻訳モデルが本文の一部に空の訳文を返しました。')
             token_count += count
@@ -643,6 +680,70 @@ class AccuracyFirstChineseTranslator:
             )
         out = self.tokenizer.batch_decode(generated, skip_special_tokens=True)[0].strip()
         return out, token_count
+
+    def _translate_engine(self, text: str, src_code: str, tgt_code: str) -> Tuple[str, int]:
+        if self._engine() == 'azure':
+            return self._translate_azure(text, src_code, tgt_code)
+        return self._translate_nllb(text, src_code, tgt_code)
+
+    def _translate_azure(self, text: str, src_code: str, tgt_code: str) -> Tuple[str, int]:
+        """Translate one prose span via Azure Translator (F0 free tier).
+
+        Returns (translation, 0): the second value is the local model's
+        token count, which the hosted API does not have; Azure enforces
+        its own per-request character limits instead. Note that the
+        optional back-translation check also goes through this method,
+        so it consumes quota too (roughly double per document).
+        """
+        key = os.getenv('AZURE_TRANSLATOR_KEY', '')
+        if not key:
+            raise EngineRequestError(
+                'Azure Translator のキーが設定されていません。'
+                '環境変数 AZURE_TRANSLATOR_KEY（必要なら AZURE_TRANSLATOR_REGION も）を設定してください。')
+        src = _AZURE_LANG.get(src_code)
+        tgt = _AZURE_LANG.get(tgt_code)
+        if src is None or tgt is None:
+            raise EngineRequestError(f'Azure Translator の言語対応表にない言語コードです: {src_code} -> {tgt_code}')
+        endpoint = os.getenv('AZURE_TRANSLATOR_ENDPOINT', 'https://api.cognitive.microsofttranslator.com').rstrip('/')
+        url = f'{endpoint}/translate?api-version=3.0&from={src}&to={tgt}'
+        headers = {
+            'Ocp-Apim-Subscription-Key': key,
+            'Content-Type': 'application/json',
+        }
+        region = os.getenv('AZURE_TRANSLATOR_REGION', '')
+        if region:
+            headers['Ocp-Apim-Subscription-Region'] = region
+        request = urllib.request.Request(
+            url,
+            data=json.dumps([{'text': text}]).encode('utf-8'),
+            headers=headers,
+            method='POST',
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read().decode('utf-8'))
+        except urllib.error.HTTPError as exc:
+            detail = ''
+            try:
+                body = json.loads(exc.read().decode('utf-8'))
+                detail = str(body.get('error', {}).get('code', ''))
+            except Exception:
+                pass
+            if exc.code in (403, 429) or detail.startswith(('403', '429')):
+                raise EngineRequestError(
+                    'Azure Translator の無料枠の上限（月2M文字）に達したか、レート制限中です。'
+                    '時間をおいて再試行してください。') from exc
+            raise EngineRequestError(f'Azure Translator へのリクエストが HTTP {exc.code} で失敗しました。') from exc
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            raise EngineRequestError('Azure Translator へ接続できませんでした。ネットワークとエンドポイント設定を確認してください。') from exc
+        try:
+            translated = payload[0]['translations'][0]['text']
+        except (TypeError, KeyError, IndexError) as exc:
+            raise EngineRequestError('Azure Translator から想定外の応答が返りました。') from exc
+        if not isinstance(translated, str) or not translated.strip():
+            raise EngineRequestError('Azure Translator が空の訳文を返しました。')
+        self.model_state = 'api_ready'
+        return translated.strip(), 0
 
     def _normalize_target_variant(self, text: str, target_key: str) -> Tuple[str, List[Check]]:
         cfg = TARGETS[target_key]
@@ -956,7 +1057,7 @@ class AccuracyFirstChineseTranslator:
             'source_language': {'code': src_code, 'label': src_label, 'auto': auto_detected},
             'target_language': {'key': target, 'code': target_cfg['code'], 'label': target_cfg['label']},
             'style': style,
-            'engine': MODEL_NAME,
+            'engine': self._engine_name(),
             'sentence_count': len(results),
             'translation': '\n\n'.join(paragraph_texts).strip('\n'),
             'document_checks': document_checks,

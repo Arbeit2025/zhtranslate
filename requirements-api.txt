@@ -1,0 +1,7 @@
+# Slim dependencies for hosted-API (Azure Translator) deployments.
+# Translation runs over HTTPS, so torch / transformers / sentencepiece /
+# stanza are unnecessary; the Stanza checks then report REVIEW
+# (unavailable), exactly as they do on the 512MB instance today.
+Flask>=3.0,<4
+langid>=1.1.6
+opencc>=1.1,<2

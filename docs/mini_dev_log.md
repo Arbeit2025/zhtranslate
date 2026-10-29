@@ -125,5 +125,15 @@
 - 内訳: 文分割（エントリ6、略語・イニシャル）、技術名保護（エントリ7、ファイル名・C++/C#）、用語集の入力堅牢化（エントリ8、全角＝・BOM・無言無視の警告化）、性能（エントリ9、Stanza 失敗キャッシュ）、チェック精度（エントリ10、漢字比率の本文ベース化）。
 - 既存テストの回帰はエントリ6の初版で1件発生し（URL 文末ピリオドの略語誤認）、同エントリ内で修正済み。以後は全サイクルで回帰なし。
 - 検証はすべてスタブ（モデルをロードしない）範囲。実モデル（NLLB）での実翻訳検証は今回も未実施。
+---
+
+# エンジン切替（エントリ11、2026-10-29）
+
+## エントリ11（2026-10-29）Azure Translator（F0）へのエンジン切替を追加
+
+- 背景: 公開先（Render 無料枠 512MB）では NLLB-600M が載らず、実翻訳は設計どおり「メモリ不足」で停止していた。ユーザーと調査（自前モデルは全候補が 512MB 超過、外部 API なら Azure Translator F0＝月2M文字無料が最適）を行い、ユーザーの決定で Azure 切替を実装した。ブランチ `ai/muse/zhtranslate-azure-engine-20261029`（main `198fa565` 起点）、Draft PR として提出。
+- 実装: (1) エンジン選択 `MT_ENGINE`（azure/nllb）。未設定なら `AZURE_TRANSLATOR_KEY` の有無で自動判定し、既定は従来どおりローカル NLLB で既存運用・既存テストに影響なし。(2) `_translate_engine` ディスパッチを `_translate_preserving` の2か所の呼び出しに挿入し、保護・復元・各種チェック・逆翻訳の流れはそのまま共用（逆翻訳も Azure を使うため枠消費は約2倍、という仕様は README とコード内コメントに明記）。(3) 言語対応は FLORES→Azure コード表（中国語のみ zh-Hans/zh-Hant へ変換）。(4) HTTP は標準ライブラリ（urllib）のみで新規依存なし。キー未設定・枠超過/レート制限（403/429）・接続失敗・応答異常は `EngineRequestError` として利用者向け日本語メッセージ＋ API は `503 ENGINE_REQUEST_FAILED` を返す（NLLB 用の setup 案内とは分離）。(5) メモリガードは NLLB 選択時のみ作動。`/api/health` に `engine` を追加し、`translation_ready` は Azure 設定時も true になるよう変更。結果 JSON の `engine` は Azure 時に `azure-translator`。(6) Azure 運用向けの軽量依存 `requirements-api.txt`（Flask/langid/OpenCC のみ）を追加。この場合 Stanza は使えず中国語チェックは REVIEW（未実行）表示になる（現行 512MB 公開先と同じ状態）。
+- 動作確認: 全テスト96件（従来85＋新規11、tests/test_azure.py。HTTP は urlopen を差し替えたスタブ検証）を3回とも成功、`py_compile` 成功。Flask の test_client で health（engine=azure／api_ready／translation_ready=true）と、ダミーキーでの翻訳リクエストが 503 ENGINE_REQUEST_FAILED になること（実 HTTP が外向きに発行される経路まで）を確認。
+- 未実施・残作業: 実キーでの実翻訳確認は未実施。公開先で有効化するには、Azure 側で Translator リソース（F0）を作成し、Render の環境変数に `AZURE_TRANSLATOR_KEY`（必要なら `AZURE_TRANSLATOR_REGION`）を設定する必要がある（キー発行と環境変数設定は所有者の作業）。Render のビルドを `requirements-api.txt` へ切り替えるかどうかも未決定（現行 requirements.txt のままでも動作するが、torch 等の導入ぶんビルドが重い）。
 - 本ブランチは Draft PR として提出し、マージはユーザーの判断を待つ。ChatGPT側ブランチ `ai/chatgpt/zhtranslate-reliability-20261029` は残存したままで、本作業では触れていない。
 
