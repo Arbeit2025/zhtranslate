@@ -22,19 +22,26 @@ TARGETS = {
         'code': 'zho_Hant',
         'label': '繁體中文（台灣正體）',
         'stanza': 'zh-hant',
-        'opencc': 't2tw.json',
+        # t2tw.json assumes Traditional input and leaves Simplified
+        # characters untouched. s2twp.json converts Simplified leakage
+        # to Taiwan Traditional (incl. Taiwan vocabulary) and is
+        # idempotent on already-Traditional input.
+        'opencc': 's2twp.json',
     },
     'hk': {
         'code': 'zho_Hant',
         'label': '繁體中文（香港）',
         'stanza': 'zh-hant',
-        'opencc': 't2hk.json',
+        # Same reason as tw: t2hk.json cannot fix Simplified leakage.
+        'opencc': 's2hk.json',
     },
     'hant': {
         'code': 'zho_Hant',
         'label': '繁體中文（通用）',
         'stanza': 'zh-hant',
-        'opencc': None,
+        # Was None (no normalization at all), so Simplified leakage
+        # from NLLB passed through unchanged.
+        'opencc': 's2t.json',
     },
 }
 
@@ -77,9 +84,14 @@ FORMAL_WARN_WORDS = {
 }
 
 PROTECT_PATTERNS = [
-    r'https?://[^\s<>]+',
+    # URLs are ASCII in practice (percent-encoding). Restricting the
+    # character class stops the match before following CJK text, which
+    # the old [^\s<>]+ swallowed when no space separated them, and
+    # keeps '?' / '&' query parts inside the single protected span.
+    r'https?://[A-Za-z0-9\-._~:/?#\[\]@!$&\'()*+,;=%]+',
     r'<ref\b[^>]*>[\s\S]*?</ref>',
     r'<ref\b[^>]*/>',
+    r'</?ref\b[^>]*>',
     r'\{\{[^{}]{0,2000}\}\}',
     r'\[\[[^\[\]]{0,2000}\]\]',
     r'\[[0-9]+\]',
@@ -88,7 +100,28 @@ PROTECT_PATTERNS = [
 NUMBER_RE = re.compile(r'(?<![0-9A-Za-z])[+-]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?%?(?![0-9A-Za-z])')
 TOKEN_RE = re.compile(r'ZZ(?:PROT|TERM)\d{3,5}ZZ')
 HAN_RE = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]')
-TECH_TOKEN_RE = re.compile(r'\b(?:[A-Z]{2,}[A-Z0-9.-]*|[A-Z][a-z]+[A-Z][A-Za-z0-9]*|[A-Za-z]+\d+[A-Za-z0-9.-]*|\d+[A-Za-z][A-Za-z0-9.-]*)\b')
+# Do NOT use \b here: in Python re, CJK kana/kanji are \w, so there is
+# no word boundary between e.g. "OpenAI" and a following "は". With \b
+# the pattern matched nothing in "OpenAIはGPT4とHTML5を使用する。"
+# and the preservation check silently never ran. ASCII-only
+# lookarounds treat any non-ASCII character as a boundary instead.
+TECH_TOKEN_RE = re.compile(r'(?<![A-Za-z0-9])(?:[A-Z]{2,}[A-Z0-9.-]*|[A-Z][a-z]+[A-Z][A-Za-z0-9]*|[A-Za-z]+\d+[A-Za-z0-9.-]*|\d+[A-Za-z][A-Za-z0-9.-]*)(?![A-Za-z0-9])')
+
+# Characters that exist only in one script (unambiguous pairs only;
+# shared / ambiguous forms such as 台, 干, 发's counterpart readings
+# are deliberately excluded to avoid false positives). Used as an
+# OpenCC-independent safety net: if the wrong script survives
+# normalization, the sentence is HOLD, never READY.
+SIMPLIFIED_ONLY_CHARS = frozenset(
+    '国学学习汉语测试简体个们为这对时间过还进远运长门问关开闭现点电车马龙风云热气压产业业务经经济历乐书画写读说话认记视声响图区医员场园县镇户务动劳团战争军'
+    '软网络数应术据库脑头湾转达标备设计机统选页内显错确译论证评议题导师级'
+    '习题录频药响'
+)
+TRADITIONAL_ONLY_CHARS = frozenset(
+    '國學學習漢語測試簡體個們為這對時間過還進遠運長門問關開閉現點電車馬龍風雲熱氣壓產業務經經濟歷樂書畫寫讀說話認記視聲響圖區醫員場園縣鎮戶務動勞團戰爭軍'
+    '軟網絡數應術據庫腦頭灣轉達標備設計機統選頁內顯錯確譯論證評議題導師級'
+    '習題錄頻藥響'
+)
 
 
 @dataclass
@@ -187,8 +220,23 @@ class AccuracyFirstChineseTranslator:
         text = text.strip()
         if not text:
             return []
+        # Protect URLs / <ref> / templates / wikilinks BEFORE splitting.
+        # Splitting first broke URLs at their '?' (query was severed)
+        # and broke <ref> at sentence punctuation inside the tag, so
+        # the fragments were never protected and could be dropped by
+        # the model without ever triggering the placeholder check.
+        protected_text, mapping = AccuracyFirstChineseTranslator._protect(
+            text, 'PROT', PROTECT_PATTERNS
+        )
+
+        def restore(segment: str) -> str:
+            for key, original in mapping.items():
+                if key in segment:
+                    segment = segment.replace(key, original)
+            return segment
+
         out: List[str] = []
-        for paragraph in re.split(r'\n{2,}', text):
+        for paragraph in re.split(r'\n{2,}', protected_text):
             paragraph = paragraph.strip()
             if not paragraph:
                 continue
@@ -198,7 +246,7 @@ class AccuracyFirstChineseTranslator:
             for p in parts:
                 p = p.strip()
                 if p:
-                    out.append(p)
+                    out.append(restore(p))
         return out or [text]
 
     @staticmethod
@@ -207,9 +255,24 @@ class AccuracyFirstChineseTranslator:
         combined = re.compile('|'.join(f'(?:{p})' for p in patterns), re.I)
 
         def repl(match: re.Match) -> str:
+            original = match.group(0)
+            suffix = ''
+            # A sentence-final '.' / '!' / '?' etc. after a URL is
+            # punctuation, not part of the URL. Keep it outside the
+            # protected span so sentence splitting still works there
+            # and the URL itself is restored byte-for-byte.
+            if original.startswith(('http://', 'https://')):
+                core = original
+                while core and core[-1] in '.,;:!?':
+                    suffix = core[-1] + suffix
+                    core = core[:-1]
+                if core.endswith(')') and '(' not in core:
+                    suffix = ')' + suffix
+                    core = core[:-1]
+                original = core
             key = f'ZZ{prefix}{len(mapping):04d}ZZ'
-            mapping[key] = match.group(0)
-            return key
+            mapping[key] = original
+            return key + suffix
 
         return combined.sub(repl, text), mapping
 
@@ -273,7 +336,33 @@ class AccuracyFirstChineseTranslator:
 
     @staticmethod
     def _technical_tokens(text: str) -> List[str]:
-        return TECH_TOKEN_RE.findall(text)
+        # The pattern's trailing class can swallow a sentence-final
+        # '.' or '-'; those are punctuation, not part of the token.
+        return [tok.rstrip('.-') for tok in TECH_TOKEN_RE.findall(text) if tok.rstrip('.-')]
+
+    @staticmethod
+    def _script_residuals(text: str, target_key: str) -> List[str]:
+        """Distinctive wrong-script characters left in the output."""
+        if target_key in {'tw', 'hk', 'hant'}:
+            bad = SIMPLIFIED_ONLY_CHARS
+        elif target_key == 'cn':
+            bad = TRADITIONAL_ONLY_CHARS
+        else:
+            return []
+        return sorted({ch for ch in text if ch in bad})
+
+    def _expected_glossary_form(self, target_term: str, target_key: str) -> str:
+        """Glossary target as it should appear after script normalization."""
+        config = TARGETS[target_key]['opencc']
+        if not config:
+            return target_term
+        converter = self._opencc(config)
+        if converter is None:
+            return target_term
+        try:
+            return converter.convert(target_term)
+        except Exception:
+            return target_term
 
     @staticmethod
     def _status_from_checks(checks: List[Check]) -> str:
@@ -459,6 +548,36 @@ class AccuracyFirstChineseTranslator:
         target, variant_checks = self._normalize_target_variant(target_restored, target_key)
         checks.extend(variant_checks)
 
+        # Wrong-script residue (e.g. Simplified characters in a Taiwan
+        # Traditional output) is a failed normalization, not a nuance.
+        residuals = self._script_residuals(target, target_key)
+        if residuals:
+            script_name = '簡体字' if target_key == 'cn' else '繁體字'
+            wrong_name = '繁體字' if target_key == 'cn' else '簡体字'
+            checks.append(Check('hold', 'SCRIPT_MISMATCH', f'{script_name}指定なのに{wrong_name}固有の文字が残っています: ' + ', '.join(residuals)))
+
+        # <ref> tags are ASCII, so their count survives script
+        # normalization. This catches a lost ref even if it was never
+        # placeholder-protected (e.g. an unmatched / malformed tag).
+        source_ref_count = len(re.findall(r'<ref\b', sentence))
+        target_ref_count = len(re.findall(r'<ref\b', target))
+        if target_ref_count < source_ref_count:
+            checks.append(Check('hold', 'REF_LOSS', f'<ref> タグが原文 {source_ref_count} 件から {target_ref_count} 件に減っています。'))
+
+        # Glossary terms are placeholder-protected (loss there is
+        # already HOLD), but verify the final, script-normalized
+        # output as well: a restored term must still be present in
+        # the form normalization would produce for it.
+        missing_glossary = []
+        for src_term, tgt_term in glossary.items():
+            if src_term not in sentence:
+                continue
+            expected = self._expected_glossary_form(tgt_term, target_key)
+            if tgt_term not in target and expected not in target:
+                missing_glossary.append(tgt_term)
+        if missing_glossary:
+            checks.append(Check('hold', 'GLOSSARY_LOSS', '用語集で指定した訳語が出力にありません: ' + ', '.join(missing_glossary)))
+
         target_numbers = self._numbers(target)
         if sorted(source_numbers) != sorted(target_numbers):
             checks.append(Check('hold', 'NUMBER_PRESERVATION', f'数値が一致しません: source={source_numbers} target={target_numbers}'))
@@ -468,9 +587,14 @@ class AccuracyFirstChineseTranslator:
         if TOKEN_RE.search(target):
             checks.append(Check('hold', 'UNRESTORED_TOKEN', '未復元の内部トークンが出力に残っています。'))
 
-        missing_tech = [tok for tok in source_tech if tok not in target]
+        missing_tech = [tok for tok in dict.fromkeys(source_tech) if tok not in target]
         if missing_tech:
-            checks.append(Check('review', 'TECH_TOKEN', '英数字の技術名・略語が出力から消えています。訳語化が妥当か確認: ' + ', '.join(missing_tech)))
+            # A dropped proper name / model name (OpenAI, GPT4, HTML5)
+            # changes the facts of the sentence, like a dropped
+            # number. It was previously only REVIEW -- and, due to
+            # the \b bug in TECH_TOKEN_RE, usually not even detected
+            # in Japanese text at all.
+            checks.append(Check('hold', 'TECH_TOKEN', '英数字の技術名・略語・固有名詞が出力から消えています: ' + ', '.join(missing_tech)))
         elif source_tech:
             checks.append(Check('ok', 'TECH_TOKEN', '検出した英数字の技術名・略語を保持しています。'))
 
