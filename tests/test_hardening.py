@@ -219,6 +219,29 @@ def test_filenames_and_symbols_survive_translation(translator):
                    for s in result['sentences'] for c in s['checks'])
 
 
+# --- Cycle 8: glossary format variants / ignored lines are surfaced ---
+
+def test_glossary_fullwidth_equals_and_bom():
+    T = AccuracyFirstChineseTranslator
+    assert T.parse_glossary('自己調整学習＝自我调节学习') == {'自己調整学習': '自我调节学习'}
+    assert T.parse_glossary('\ufeff自己調整学習=自我调节学习') == {'自己調整学習': '自我调节学习'}
+
+
+def test_glossary_ignored_lines_become_review(translator):
+    result = translator.translate_document(
+        '学习软件。', source='zho_Hans', target='cn',
+        glossary_text='软件:软件\n坏行', run_backtranslation=False)
+    assert result['status'] == 'REVIEW'
+    assert any(c['code'] == 'GLOSSARY_FORMAT' for c in result['document_checks'])
+
+
+def test_glossary_clean_lines_no_format_warning(translator):
+    result = translator.translate_document(
+        '学习软件。', source='zho_Hans', target='cn',
+        glossary_text='# comment\n软件＝軟體', run_backtranslation=False)
+    assert not any(c['code'] == 'GLOSSARY_FORMAT' for c in result['document_checks'])
+
+
 def test_changed_number_still_holds(translator):
     translator._translate_nllb = lambda *args: ('价格是12.6美元。', 10)
     result = translator.translate_document(

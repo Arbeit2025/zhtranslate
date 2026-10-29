@@ -397,9 +397,13 @@ class AccuracyFirstChineseTranslator:
         return ''.join(chunks), mapping
 
     @staticmethod
-    def parse_glossary(text: str) -> Dict[str, str]:
+    def _parse_glossary_detailed(text: str) -> Tuple[Dict[str, str], int]:
         glossary: Dict[str, str] = {}
-        for line in text.splitlines():
+        ignored = 0
+        # Pasted glossaries often carry a BOM or full-width '＝' (Japanese
+        # keyboards). Both used to make lines silently unparseable, so the
+        # glossary quietly did nothing and no check ever fired.
+        for line in text.lstrip('\ufeff').splitlines():
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
@@ -407,11 +411,21 @@ class AccuracyFirstChineseTranslator:
                 src, tgt = line.split('\t', 1)
             elif '=' in line:
                 src, tgt = line.split('=', 1)
+            elif '＝' in line:
+                src, tgt = line.split('＝', 1)
             else:
+                ignored += 1
                 continue
             src, tgt = src.strip(), tgt.strip()
             if src and tgt:
                 glossary[src] = tgt
+            else:
+                ignored += 1
+        return glossary, ignored
+
+    @staticmethod
+    def parse_glossary(text: str) -> Dict[str, str]:
+        glossary, _ignored = AccuracyFirstChineseTranslator._parse_glossary_detailed(text)
         return glossary
 
     @staticmethod
@@ -881,7 +895,7 @@ class AccuracyFirstChineseTranslator:
             src_code = source
             src_label = NLLB_TO_LABEL.get(src_code, src_code)
 
-        glossary = self.parse_glossary(glossary_text)
+        glossary, glossary_ignored = self._parse_glossary_detailed(glossary_text)
         # Preserve paragraph breaks: sentences were previously flattened
         # into one '\n'-joined block, so a multi-paragraph document came
         # back as a single paragraph. Translate paragraph by paragraph;
@@ -900,12 +914,18 @@ class AccuracyFirstChineseTranslator:
 
         if any(r['status'] == 'HOLD' for r in results):
             overall = 'HOLD'
-        elif any(r['status'] == 'REVIEW' for r in results) or auto_detected:
+        elif any(r['status'] == 'REVIEW' for r in results) or auto_detected or glossary_ignored:
             overall = 'REVIEW'
         else:
             overall = 'READY'
 
         document_checks = []
+        if glossary_ignored:
+            document_checks.append({
+                'level': 'review',
+                'code': 'GLOSSARY_FORMAT',
+                'message': f'用語集の {glossary_ignored} 行を解釈できず無視しました。「原語=訳語」「原語＝訳語」またはタブ区切りで入力してください。',
+            })
         if auto_detected:
             document_checks.append({
                 'level': 'review',
