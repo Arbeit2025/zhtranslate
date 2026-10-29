@@ -81,6 +81,40 @@ def test_many_paragraphs_preserved(translator):
     assert result['sentence_count'] == 3
 
 
+# --- Cycle 3: glossary ASCII boundaries / TECH protection vs tokens ---
+
+def test_glossary_ascii_key_not_applied_inside_word(translator):
+    result = translator.translate_document(
+        'AI技术与AIDS防治', source='zho_Hans', target='cn',
+        glossary_text='AI=人工智能', run_backtranslation=False,
+    )
+    assert result['translation'] == '人工智能技术与AIDS防治'
+    assert 'ZZ' not in result['translation']
+    assert result['status'] != 'HOLD'
+
+
+def test_glossary_cjk_key_still_matches_inside_compound(translator):
+    result = translator.translate_document(
+        '自主学习很重要', source='zho_Hans', target='cn',
+        glossary_text='学习=研修', run_backtranslation=False,
+    )
+    assert result['translation'] == '自主研修很重要'
+
+
+def test_glossary_ascii_key_applies_at_boundaries(translator):
+    result = translator.translate_document(
+        'OpenAIとAI、AI技術', source='zho_Hans', target='cn',
+        glossary_text='AI=人工智能', run_backtranslation=False,
+    )
+    assert result['translation'].count('人工智能') == 2
+
+
+def test_tech_protection_skips_spans_containing_tokens(translator):
+    from translator import TECH_TOKEN_RE
+    protected, mapping = translator._protect('ZZTERM0001ZZDS', 'TECH', [TECH_TOKEN_RE.pattern])
+    assert protected == 'ZZTERM0001ZZDS' and mapping == {}
+
+
 def test_changed_number_still_holds(translator):
     translator._translate_nllb = lambda *args: ('价格是12.6美元。', 10)
     result = translator.translate_document(

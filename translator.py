@@ -310,7 +310,12 @@ class AccuracyFirstChineseTranslator:
         mapping: Dict[str, str] = {}
         combined = re.compile('|'.join(f'(?:{p})' for p in patterns), re.I if prefix == 'PROT' else 0)
         matches = [(m.start(), m.end()) for m in combined.finditer(text)
-                   if prefix != 'TECH' or not TOKEN_RE.fullmatch(m.group())]
+                   if prefix != 'TECH' or not TOKEN_RE.search(m.group())]
+        # For TECH: a match that merely *is* a token was already excluded,
+        # but a match that *contains* a token plus extra letters (e.g.
+        # ZZTERM0001ZZDS) must be excluded too. Protecting it would restore
+        # the whole span literally in the single restore pass and leak the
+        # inner glossary token into the final output unrestored.
         # Regex alone cannot protect nested templates/wikilinks. Add balanced
         # outer spans before choosing non-overlapping ranges.
         if prefix == 'PROT':
@@ -381,7 +386,21 @@ class AccuracyFirstChineseTranslator:
         mapping: Dict[str, str] = {}
         if not glossary:
             return text, mapping
-        terms = re.compile('|'.join(re.escape(src) for src in sorted(glossary, key=len, reverse=True)))
+        def term_pattern(src: str) -> str:
+            # An ASCII glossary key must not match inside a longer ASCII
+            # word: key "AI" rewriting "AIDS" corrupted the word and left
+            # an unrestored ZZTERM token in the output (the token+letters
+            # span was then swallowed as one technical token). CJK keys
+            # keep substring matching, which is how Japanese/Chinese
+            # compounds are written.
+            pat = re.escape(src)
+            if src and src[0].isascii() and (src[0].isalnum() or src[0] == '_'):
+                pat = r'(?<![A-Za-z0-9_])' + pat
+            if src and src[-1].isascii() and (src[-1].isalnum() or src[-1] == '_'):
+                pat += r'(?![A-Za-z0-9_])'
+            return pat
+
+        terms = re.compile('|'.join(term_pattern(src) for src in sorted(glossary, key=len, reverse=True)))
 
         def replace(match):
             index = len(mapping)
