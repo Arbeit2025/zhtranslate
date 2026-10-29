@@ -3,9 +3,11 @@ from __future__ import annotations
 import html
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass, asdict
 from difflib import SequenceMatcher
 from typing import Dict, Iterable, List, Tuple
+from pathlib import Path
 
 
 MODEL_NAME = os.getenv('MT_MODEL', 'facebook/nllb-200-distilled-600M')
@@ -84,21 +86,20 @@ FORMAL_WARN_WORDS = {
 }
 
 PROTECT_PATTERNS = [
-    # URLs are ASCII in practice (percent-encoding). Restricting the
-    # character class stops the match before following CJK text, which
-    # the old [^\s<>]+ swallowed when no space separated them, and
-    # keeps '?' / '&' query parts inside the single protected span.
-    r'https?://[A-Za-z0-9\-._~:/?#\[\]@!$&\'()*+,;=%]+',
+    # Preserve Unicode paths and query strings; stop at surrounding CJK
+    # punctuation, whitespace, markup, or quotes.
+    r'https?://[^\s<>\{\}"\'，。！？、；：]+',
     r'<ref\b[^>]*>[\s\S]*?</ref>',
     r'<ref\b[^>]*/>',
     r'</?ref\b[^>]*>',
     r'\{\{[^{}]{0,2000}\}\}',
     r'\[\[[^\[\]]{0,2000}\]\]',
     r'\[[0-9]+\]',
+    r'ZZ(?:PROT|TERM|TECH)\d+ZZ',
 ]
 
-NUMBER_RE = re.compile(r'(?<![0-9A-Za-z])[+-]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?%?(?![0-9A-Za-z])')
-TOKEN_RE = re.compile(r'ZZ(?:PROT|TERM)\d{3,5}ZZ')
+NUMBER_RE = re.compile(r'(?<![0-9A-Za-z])[+-]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?%?(?!\d)')
+TOKEN_RE = re.compile(r'ZZ(?:PROT|TERM|TECH)\d+ZZ')
 HAN_RE = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]')
 # Do NOT use \b here: in Python re, CJK kana/kanji are \w, so there is
 # no word boundary between e.g. "OpenAI" and a following "は". With \b
@@ -131,13 +132,41 @@ class Check:
     message: str
 
 
+class ModelUnavailableError(RuntimeError):
+    """Model setup failed; callers can report an actionable HTTP 503."""
+
+
+class InsufficientMemoryError(ModelUnavailableError):
+    """Known runtime limit cannot hold the default NLLB model."""
+
+
+def memory_limit_mb() -> int | None:
+    limits = []
+    for path in ('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes'):
+        try:
+            value = Path(path).read_text().strip()
+            if value != 'max' and 0 < int(value) < 2 ** 60:
+                limits.append(int(value))
+        except (OSError, ValueError):
+            pass
+    return min(limits) // (1024 * 1024) if limits else None
+
+
 class AccuracyFirstChineseTranslator:
     def __init__(self) -> None:
         self.tokenizer = None
         self.model = None
         self.model_loaded = False
+        self.model_state = 'not_loaded'
+        self.memory_limit_mb = memory_limit_mb()
+        if self._insufficient_model_memory():
+            self.model_state = 'insufficient_memory'
         self.stanza_pipelines: Dict[str, object] = {}
         self.opencc_converters: Dict[str, object] = {}
+
+    def _insufficient_model_memory(self) -> bool:
+        return (MODEL_NAME == 'facebook/nllb-200-distilled-600M'
+                and self.memory_limit_mb is not None and self.memory_limit_mb < 3072)
 
     @staticmethod
     def language_choices() -> List[dict]:
@@ -163,21 +192,40 @@ class AccuracyFirstChineseTranslator:
     def _load_model(self) -> None:
         if self.model_loaded:
             return
-        import torch
-        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
-        if torch.cuda.is_available():
-            self.model = self.model.to('cuda')
-        elif getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available():
-            self.model = self.model.to('mps')
-        self.model.eval()
-        self.model_loaded = True
+        if self._insufficient_model_memory():
+            self.model_state = 'insufficient_memory'
+            raise InsufficientMemoryError(
+                f'公開先のメモリが不足しています（上限 {self.memory_limit_mb}MB）。'
+                'NLLBによる翻訳にはメモリに余裕のあるサーバーかローカル環境が必要です。'
+                '中国語同士の表記変換はこのまま利用できます。'
+            )
+        self.model_state = 'loading'
+        try:
+            import torch
+            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+            model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
+            if torch.cuda.is_available():
+                model = model.to('cuda')
+            elif getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available():
+                model = model.to('mps')
+            model.eval()
+            self.tokenizer, self.model = tokenizer, model
+            self.model_loaded = True
+            self.model_state = 'ready'
+        except Exception as exc:
+            self.model_state = 'error'
+            self.tokenizer, self.model = None, None
+            raise ModelUnavailableError('NLLB model setup failed') from exc
 
     def _load_stanza(self, lang: str) -> bool:
         if lang in self.stanza_pipelines:
             return True
         if os.getenv('DISABLE_STANZA') == '1':
+            return False
+        if self.memory_limit_mb is not None and self.memory_limit_mb < 2048:
+            # Loading torch plus both parsers on the free 512MB runtime can
+            # kill even a simple Chinese-to-Chinese conversion request.
             return False
         try:
             import stanza
@@ -188,9 +236,10 @@ class AccuracyFirstChineseTranslator:
                     processors='tokenize,pos,lemma,depparse',
                     use_gpu=torch.cuda.is_available(),
                     verbose=False,
+                    download_method=None,
                 )
             except Exception:
-                if os.getenv('AUTO_DOWNLOAD_STANZA', '1') != '1':
+                if os.getenv('AUTO_DOWNLOAD_STANZA', '0') != '1':
                     return False
                 stanza.download(lang, verbose=False)
                 pipe = stanza.Pipeline(
@@ -198,6 +247,7 @@ class AccuracyFirstChineseTranslator:
                     processors='tokenize,pos,lemma,depparse',
                     use_gpu=torch.cuda.is_available(),
                     verbose=False,
+                    download_method=None,
                 )
             self.stanza_pipelines[lang] = pipe
             return True
@@ -252,10 +302,27 @@ class AccuracyFirstChineseTranslator:
     @staticmethod
     def _protect(text: str, prefix: str, patterns: Iterable[str]) -> Tuple[str, Dict[str, str]]:
         mapping: Dict[str, str] = {}
-        combined = re.compile('|'.join(f'(?:{p})' for p in patterns), re.I)
+        combined = re.compile('|'.join(f'(?:{p})' for p in patterns), re.I if prefix == 'PROT' else 0)
+        matches = [(m.start(), m.end()) for m in combined.finditer(text)
+                   if prefix != 'TECH' or not TOKEN_RE.fullmatch(m.group())]
+        # Regex alone cannot protect nested templates/wikilinks. Add balanced
+        # outer spans before choosing non-overlapping ranges.
+        if prefix == 'PROT':
+            for opening, closing in (('{{', '}}'), ('[[', ']]')):
+                stack = []
+                for m in re.finditer(re.escape(opening) + '|' + re.escape(closing), text):
+                    if m.group() == opening:
+                        stack.append(m.start())
+                    elif stack:
+                        start = stack.pop()
+                        if not stack:
+                            matches.append((start, m.end()))
+        spans = []
+        for start, end in sorted(matches, key=lambda x: (x[0], -x[1])):
+            if not spans or start >= spans[-1][1]:
+                spans.append((start, end))
 
-        def repl(match: re.Match) -> str:
-            original = match.group(0)
+        def repl(original: str) -> str:
             suffix = ''
             # A sentence-final '.' / '!' / '?' etc. after a URL is
             # punctuation, not part of the URL. Keep it outside the
@@ -270,11 +337,20 @@ class AccuracyFirstChineseTranslator:
                     suffix = ')' + suffix
                     core = core[:-1]
                 original = core
-            key = f'ZZ{prefix}{len(mapping):04d}ZZ'
+            index = len(mapping)
+            key = f'ZZ{prefix}{index:04d}ZZ'
+            while key in text or key in mapping:
+                index += 1
+                key = f'ZZ{prefix}{index:04d}ZZ'
             mapping[key] = original
             return key + suffix
 
-        return combined.sub(repl, text), mapping
+        chunks, previous = [], 0
+        for start, end in spans:
+            chunks.extend((text[previous:start], repl(text[start:end])))
+            previous = end
+        chunks.append(text[previous:])
+        return ''.join(chunks), mapping
 
     @staticmethod
     def parse_glossary(text: str) -> Dict[str, str]:
@@ -297,23 +373,66 @@ class AccuracyFirstChineseTranslator:
     @staticmethod
     def _protect_glossary(text: str, glossary: Dict[str, str]) -> Tuple[str, Dict[str, str]]:
         mapping: Dict[str, str] = {}
-        for src in sorted(glossary, key=len, reverse=True):
-            if src not in text:
-                continue
-            key = f'ZZTERM{len(mapping):04d}ZZ'
-            text = text.replace(src, key)
-            mapping[key] = glossary[src]
-        return text, mapping
+        if not glossary:
+            return text, mapping
+        terms = re.compile('|'.join(re.escape(src) for src in sorted(glossary, key=len, reverse=True)))
+
+        def replace(match):
+            index = len(mapping)
+            key = f'ZZTERM{index:04d}ZZ'
+            while key in text or key in mapping:
+                index += 1
+                key = f'ZZTERM{index:04d}ZZ'
+            mapping[key] = glossary[match.group()]
+            return key
+
+        # Protect every occurrence separately, and never match inside a PROT
+        # token (e.g. a user glossary entry named "ZZ" or "PROT").
+        parts = TOKEN_RE.split(text)
+        tokens = TOKEN_RE.findall(text)
+        out = []
+        for i, part in enumerate(parts):
+            out.append(terms.sub(replace, part))
+            if i < len(tokens):
+                out.append(tokens[i])
+        return ''.join(out), mapping
 
     @staticmethod
     def _restore(text: str, mapping: Dict[str, str]) -> Tuple[str, List[str]]:
-        missing = []
-        for key, original in mapping.items():
-            if key not in text:
-                missing.append(key)
+        missing = [key for key in mapping if text.count(key) != 1]
+        if not mapping:
+            return text, missing
+        # One pass: restored literal text may itself resemble another key.
+        pattern = re.compile('|'.join(re.escape(key) for key in mapping))
+        return pattern.sub(lambda match: mapping[match.group()], text), missing
+
+    def _translate_preserving(self, text: str, mapping: Dict[str, str], src: str, tgt: str) -> Tuple[str, int]:
+        """Translate prose spans; keep protected material out of model generation.
+
+        NLLB has no guarantee of copying arbitrary placeholder strings. Joining
+        independently translated spans preserves each URL/term exactly once.
+        This can reduce fluency, so the caller adds a REVIEW for split prose.
+        """
+        if not mapping:
+            return self._translate_nllb(text, src, tgt)
+        pattern = re.compile('(' + '|'.join(re.escape(k) for k in mapping) + ')')
+        output, token_count = [], 0
+        for part in pattern.split(text):
+            if not part:
                 continue
-            text = text.replace(key, original)
-        return text, missing
+            if part in mapping or not re.search(r'[^\W\d_]|\d', part, re.UNICODE):
+                output.append(part)
+                continue
+            translated, count = self._translate_nllb(part.strip(), src, tgt)
+            if not translated.strip():
+                raise ValueError('翻訳モデルが本文の一部に空の訳文を返しました。')
+            token_count += count
+            if token_count > 500:
+                raise ValueError('単文が500 NLLB tokensを超えています。文を分けてください。')
+            leading = part[:len(part) - len(part.lstrip())]
+            trailing = part[len(part.rstrip()):]
+            output.append(leading + translated + trailing)
+        return ''.join(output), token_count
 
     @staticmethod
     def _normalize_for_similarity(text: str) -> str:
@@ -452,7 +571,7 @@ class AccuracyFirstChineseTranslator:
         else:
             checks.append(Check('ok', 'CHINESE_DENSITY', '中国語文字を十分に含む出力です。'))
 
-        if re.search(r'[\u3400-\u9fff][,;:][\u3400-\u9fff]', target) or re.search(r'[\u3400-\u9fff][!?]', target):
+        if re.search(r'[\u3400-\u9fff][,;:][\u3400-\u9fff]', target) or re.search(r'[\u3400-\u9fff][.!?]', target):
             checks.append(Check('review', 'PUNCT_STYLE', '中国語本文中に半角の欧文句読点があります。中文句読点を確認してください。'))
         else:
             checks.append(Check('ok', 'PUNCT_STYLE', '明白な半角句読点混在は検出しませんでした。'))
@@ -513,19 +632,22 @@ class AccuracyFirstChineseTranslator:
 
         protected, protected_map = self._protect(sentence, 'PROT', PROTECT_PATTERNS)
         prepared, glossary_map = self._protect_glossary(protected, glossary)
-        all_map = {**protected_map, **glossary_map}
-
-        source_numbers = self._numbers(sentence)
-        source_tech = self._technical_tokens(sentence)
+        source_prose = TOKEN_RE.sub('', prepared)
+        source_numbers = self._numbers(source_prose)
+        source_tech = self._technical_tokens(source_prose)
+        prepared, tech_map = self._protect(prepared, 'TECH', [TECH_TOKEN_RE.pattern])
+        all_map = {**protected_map, **glossary_map, **tech_map}
 
         try:
             # Chinese-to-Chinese is script/regional conversion, not paraphrasing MT.
-            if src_code in {'zho_Hans', 'zho_Hant'} and not glossary_map:
+            if src_code in {'zho_Hans', 'zho_Hant'}:
                 target_raw = prepared
                 token_count = len(sentence)
                 checks.append(Check('ok', 'ZH_TO_ZH', '中国語入力なので NLLB 再翻訳を避け、表記変換を優先しました。'))
             else:
-                target_raw, token_count = self._translate_nllb(prepared, src_code, target_code)
+                target_raw, token_count = self._translate_preserving(prepared, all_map, src_code, target_code)
+                if all_map and token_count:
+                    checks.append(Check('review', 'SEGMENTED_TRANSLATION', 'URL・記法・固定用語・技術名を保持して本文を分割翻訳しました。前後の語順・文脈を確認してください。'))
         except ValueError as exc:
             checks.append(Check('hold', 'MODEL_INPUT', str(exc)))
             return {
@@ -539,18 +661,32 @@ class AccuracyFirstChineseTranslator:
                 'analysis': {},
             }
 
-        target_restored, missing = self._restore(target_raw, all_map)
+        if not target_raw.strip():
+            checks.append(Check('hold', 'EMPTY_TRANSLATION', '翻訳モデルが空の訳文を返しました。'))
+
+        # Normalize prose BEFORE restoring literal URLs/wiki markup/technical
+        # names. Glossary targets alone are normalized to the requested script.
+        normalized, variant_checks = self._normalize_target_variant(target_raw, target_key)
+        checks.extend(variant_checks)
+        normalized_glossary = {key: self._expected_glossary_form(value, target_key)
+                               for key, value in glossary_map.items()}
+        restore_map = {**protected_map, **normalized_glossary, **tech_map}
+        target, missing = self._restore(normalized, restore_map)
         if missing:
             checks.append(Check('hold', 'PLACEHOLDER_LOSS', '保護した Wiki 記法・URL・用語集トークンの一部が翻訳中に失われました。'))
         else:
             checks.append(Check('ok', 'PLACEHOLDER_LOSS', '保護トークンをすべて復元しました。'))
 
-        target, variant_checks = self._normalize_target_variant(target_restored, target_key)
-        checks.extend(variant_checks)
-
         # Wrong-script residue (e.g. Simplified characters in a Taiwan
         # Traditional output) is a failed normalization, not a nuance.
-        residuals = self._script_residuals(target, target_key)
+        checked_prose = normalized
+        for key in protected_map:
+            checked_prose = checked_prose.replace(key, '')
+        for key, value in normalized_glossary.items():
+            checked_prose = checked_prose.replace(key, value)
+        for key in tech_map:
+            checked_prose = checked_prose.replace(key, '')
+        residuals = self._script_residuals(checked_prose, target_key)
         if residuals:
             script_name = '簡体字' if target_key == 'cn' else '繁體字'
             wrong_name = '繁體字' if target_key == 'cn' else '簡体字'
@@ -564,30 +700,34 @@ class AccuracyFirstChineseTranslator:
         if target_ref_count < source_ref_count:
             checks.append(Check('hold', 'REF_LOSS', f'<ref> タグが原文 {source_ref_count} 件から {target_ref_count} 件に減っています。'))
 
+        expected_literals = {literal: sentence.count(literal) for literal in protected_map.values()}
+        if any(target.count(literal) != count for literal, count in expected_literals.items()):
+            checks.append(Check('hold', 'PROTECTED_CONTENT', '保護したURL・Wiki記法の内容または出現回数が一致しません。'))
+
         # Glossary terms are placeholder-protected (loss there is
         # already HOLD), but verify the final, script-normalized
         # output as well: a restored term must still be present in
         # the form normalization would produce for it.
         missing_glossary = []
-        for src_term, tgt_term in glossary.items():
-            if src_term not in sentence:
-                continue
-            expected = self._expected_glossary_form(tgt_term, target_key)
-            if tgt_term not in target and expected not in target:
-                missing_glossary.append(tgt_term)
+        for expected, count in Counter(normalized_glossary.values()).items():
+            if target.count(expected) < count:
+                missing_glossary.append(expected)
         if missing_glossary:
             checks.append(Check('hold', 'GLOSSARY_LOSS', '用語集で指定した訳語が出力にありません: ' + ', '.join(missing_glossary)))
 
-        target_numbers = self._numbers(target)
+        target_numbers = self._numbers(TOKEN_RE.sub('', normalized))
         if sorted(source_numbers) != sorted(target_numbers):
             checks.append(Check('hold', 'NUMBER_PRESERVATION', f'数値が一致しません: source={source_numbers} target={target_numbers}'))
         else:
             checks.append(Check('ok', 'NUMBER_PRESERVATION', '数値を保持しています。'))
 
-        if TOKEN_RE.search(target):
+        if any(key in target and key not in sentence for key in all_map):
             checks.append(Check('hold', 'UNRESTORED_TOKEN', '未復元の内部トークンが出力に残っています。'))
 
-        missing_tech = [tok for tok in dict.fromkeys(source_tech) if tok not in target]
+        output_tech = Counter(self._technical_tokens(TOKEN_RE.sub('', normalized)))
+        output_tech.update(tok for key, value in tech_map.items() if key in normalized
+                           for tok in self._technical_tokens(value))
+        missing_tech = [tok for tok, count in Counter(source_tech).items() if output_tech[tok] != count]
         if missing_tech:
             # A dropped proper name / model name (OpenAI, GPT4, HTML5)
             # changes the facts of the sentence, like a dropped
@@ -598,15 +738,18 @@ class AccuracyFirstChineseTranslator:
         elif source_tech:
             checks.append(Check('ok', 'TECH_TOKEN', '検出した英数字の技術名・略語を保持しています。'))
 
-        zh_checks, analysis = self._chinese_checks(target, style, target_key)
-        checks.extend(zh_checks)
+        if checked_prose.strip() or normalized_glossary:
+            zh_checks, analysis = self._chinese_checks(target, style, target_key)
+            checks.extend(zh_checks)
+        else:
+            analysis = {'sentences': [], 'tokens': [], 'han_count': 0}
 
         back = ''
         sim = None
         if run_backtranslation and src_code not in {'zho_Hans', 'zho_Hant'}:
             try:
                 back_protected, bt_map = self._protect(target, 'PROT', PROTECT_PATTERNS)
-                back_raw, _ = self._translate_nllb(back_protected, target_code, src_code)
+                back_raw, _ = self._translate_preserving(back_protected, bt_map, target_code, src_code)
                 back, bt_missing = self._restore(back_raw, bt_map)
                 if bt_missing:
                     checks.append(Check('review', 'BACK_PLACEHOLDER', '逆翻訳時に保護記法の復元失敗がありました。'))
@@ -642,8 +785,12 @@ class AccuracyFirstChineseTranslator:
         glossary_text: str = '',
         run_backtranslation: bool = True,
     ) -> dict:
+        if not text.strip():
+            raise ValueError('入力がありません。')
         if target not in TARGETS:
             raise ValueError('未対応の中国語出力モードです。')
+        if style not in {'formal', 'wikipedia', 'neutral'}:
+            raise ValueError('未対応の文体です。')
 
         auto_detected = False
         if source == 'auto':

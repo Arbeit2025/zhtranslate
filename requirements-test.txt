@@ -1,0 +1,4 @@
+Flask>=3.0,<4
+opencc>=1.1,<2
+langid>=1.1.6
+pytest>=8,<10

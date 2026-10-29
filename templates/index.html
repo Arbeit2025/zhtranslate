@@ -60,8 +60,8 @@
       </div>
       <pre id="output" class="output">ここに翻訳結果が表示されます。</pre>
       <div class="actions">
-        <button id="copy">コピー</button>
-        <button id="json">分析JSON</button>
+        <button id="copy" disabled>コピー</button>
+        <button id="json" disabled>分析JSON</button>
       </div>
     </div>
   </section>
@@ -81,6 +81,8 @@
 
 <script>
 let lastResult = null;
+let requestVersion = 0;
+let activeRequest = null;
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
@@ -90,6 +92,7 @@ function badge(status){
 }
 function render(data){
   lastResult = data;
+  $('copy').disabled = false; $('json').disabled = false;
   $('output').textContent = data.translation || '［翻訳なし］';
   $('targetLabel').textContent = data.target_language?.label || '中文';
   $('overall').textContent = data.status;
@@ -108,23 +111,49 @@ function render(data){
   }).join('');
 }
 
+function resetResult(){
+  lastResult = null;
+  $('copy').disabled = true; $('json').disabled = true;
+  $('targetLabel').textContent = '中文';
+  $('docchecks').innerHTML = '';
+  $('sentences').innerHTML = '<p class="muted">まだ解析していません。</p>';
+}
+
 $('go').onclick = async () => {
+  const version = ++requestVersion;
+  if(activeRequest) activeRequest.abort();
+  const controller = new AbortController(); activeRequest = controller;
+  resetResult();
   const btn = $('go'); btn.disabled = true; btn.textContent = '解析中…';
   $('overall').textContent = 'RUNNING'; $('overall').className = 'badge idle';
+  $('output').textContent = '翻訳中です。初回はモデルの読み込みに時間がかかります。';
+  const timeout = setTimeout(() => controller.abort(), 300000);
   try{
-    const res = await fetch('/api/translate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+    const res = await fetch('/api/translate', {method:'POST', signal:controller.signal, headers:{'Content-Type':'application/json'}, body: JSON.stringify({
       text:$('input').value, source:$('source').value, target:$('target').value, style:$('style').value,
       glossary:$('glossary').value, backtranslation:$('back').checked
     })});
-    const data = await res.json();
+    const data = await res.json().catch(() => { throw new Error(`サーバーが応答できませんでした（HTTP ${res.status}）。しばらく待って再実行してください。`); });
+    if(version !== requestVersion) return;
     if(!res.ok) throw new Error(data.error || '翻訳に失敗しました');
     render(data);
   }catch(e){
+    if(version !== requestVersion) return;
+    resetResult();
     $('overall').textContent = 'ERROR'; $('overall').className = 'badge hold';
-    $('output').textContent = String(e.message || e);
-  }finally{ btn.disabled = false; btn.textContent = '精密翻訳'; }
+    $('output').textContent = e.name === 'AbortError' ? '翻訳が時間内に完了しませんでした。サーバーのモデル準備状況を確認してください。' : String(e.message || e);
+  }finally{
+    clearTimeout(timeout);
+    if(version === requestVersion){ activeRequest = null; btn.disabled = false; btn.textContent = '精密翻訳'; }
+  }
 };
-$('clear').onclick = () => { $('input').value=''; $('output').textContent=''; $('docchecks').innerHTML=''; $('sentences').innerHTML='<p class="muted">まだ解析していません。</p>'; };
+$('clear').onclick = () => {
+  ++requestVersion;
+  if(activeRequest) activeRequest.abort(); activeRequest = null;
+  resetResult(); $('input').value=''; $('output').textContent='';
+  $('overall').textContent='IDLE'; $('overall').className='badge idle';
+  $('go').disabled=false; $('go').textContent='精密翻訳';
+};
 $('copy').onclick = async () => { if(lastResult) await navigator.clipboard.writeText(lastResult.translation || ''); };
 $('json').onclick = () => {
   if(!lastResult) return;
