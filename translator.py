@@ -830,11 +830,21 @@ class AccuracyFirstChineseTranslator:
             src_label = NLLB_TO_LABEL.get(src_code, src_code)
 
         glossary = self.parse_glossary(glossary_text)
-        sentences = self.split_sentences(text)
-        results = [
-            self.translate_sentence(s, src_code, target, style, glossary, run_backtranslation)
-            for s in sentences
-        ]
+        # Preserve paragraph breaks: sentences were previously flattened
+        # into one '\n'-joined block, so a multi-paragraph document came
+        # back as a single paragraph. Translate paragraph by paragraph;
+        # the flat per-sentence results list is unchanged.
+        results = []
+        paragraph_texts = []
+        for paragraph in re.split(r'\n{2,}', text.strip()):
+            if not paragraph.strip():
+                continue
+            paragraph_results = [
+                self.translate_sentence(s, src_code, target, style, glossary, run_backtranslation)
+                for s in self.split_sentences(paragraph)
+            ]
+            results.extend(paragraph_results)
+            paragraph_texts.append('\n'.join(r['translation'] for r in paragraph_results if r['translation']))
 
         if any(r['status'] == 'HOLD' for r in results):
             overall = 'HOLD'
@@ -859,7 +869,7 @@ class AccuracyFirstChineseTranslator:
             'style': style,
             'engine': MODEL_NAME,
             'sentence_count': len(results),
-            'translation': '\n'.join(r['translation'] for r in results if r['translation']),
+            'translation': '\n\n'.join(paragraph_texts).strip('\n'),
             'document_checks': document_checks,
             'sentences': results,
         }

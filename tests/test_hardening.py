@@ -56,6 +56,31 @@ def test_reformatted_numbers_do_not_hold(translator):
     )
 
 
+# --- Cycle 2: paragraph breaks survive document translation ---
+
+def test_paragraph_breaks_preserved(translator):
+    result = translator.translate_document(
+        '学习软件。\n\n网络运行。学习更多。',
+        source='zho_Hans', target='tw', run_backtranslation=False,
+    )
+    assert result['translation'] == '學習軟體。\n\n網路執行。\n學習更多。'
+    assert result['sentence_count'] == 3
+
+
+def test_single_paragraph_unchanged(translator):
+    result = translator.translate_document(
+        '学习软件。网络运行。', source='zho_Hans', target='tw', run_backtranslation=False,
+    )
+    assert result['translation'] == '學習軟體。\n網路執行。'
+
+
+def test_many_paragraphs_preserved(translator):
+    text = '\n\n\n'.join(['学习软件。', '网络运行。', '学习软件。'])
+    result = translator.translate_document(text, source='zho_Hans', target='cn', run_backtranslation=False)
+    assert result['translation'].count('\n\n') == 2
+    assert result['sentence_count'] == 3
+
+
 def test_changed_number_still_holds(translator):
     translator._translate_nllb = lambda *args: ('价格是12.6美元。', 10)
     result = translator.translate_document(
