@@ -89,6 +89,9 @@ PROTECT_PATTERNS = [
     # Preserve Unicode paths and query strings; stop at surrounding CJK
     # punctuation, whitespace, markup, or quotes.
     r'https?://[^\s<>\{\}"\'，。！？、；：]+',
+    # Email addresses are literal strings like URLs: a model must never
+    # translate, transliterate or drop them, so protect them the same way.
+    r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}',
     r'<ref\b[^>]*>[\s\S]*?</ref>',
     r'<ref\b[^>]*/>',
     r'</?ref\b[^>]*>',
@@ -98,7 +101,13 @@ PROTECT_PATTERNS = [
     r'ZZ(?:PROT|TERM|TECH)\d+ZZ',
 ]
 
-NUMBER_RE = re.compile(r'(?<![0-9A-Za-z])[+-]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?%?(?!\d)')
+NUMBER_RE = re.compile(r'(?<![0-9A-Za-z])[+-]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?(?:\s*%)?(?!\d)')
+# Japanese text often mixes full-width digits / punctuation (２０２６年,
+# １２．５％). \d matches the digits, but ． and ％ do not match [.,%], so a
+# full-width number was extracted in pieces and then failed the preservation
+# comparison against a half-width translation. Normalize a copy of the text
+# for extraction only.
+_NUMBER_NORMALIZE = str.maketrans('０１２３４５６７８９．，％＋－', '0123456789.,%+-')
 TOKEN_RE = re.compile(r'ZZ(?:PROT|TERM|TECH)\d+ZZ')
 HAN_RE = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]')
 # Do NOT use \b here: in Python re, CJK kana/kanji are \w, so there is
@@ -117,11 +126,20 @@ SIMPLIFIED_ONLY_CHARS = frozenset(
     '国学学习汉语测试简体个们为这对时间过还进远运长门问关开闭现点电车马龙风云热气压产业业务经经济历乐书画写读说话认记视声响图区医员场园县镇户务动劳团战争军'
     '软网络数应术据库脑头湾转达标备设计机统选页内显错确译论证评议题导师级'
     '习题录频药响'
+    # 2026-10-29 expansion (cycle 5): every pair below was verified with
+    # OpenCC (s2t converts the simplified char to a single different
+    # character and t2s converts it back). Deliberately ambiguous forms
+    # (发, 复, 余, 后, 吃, 叶, 于 and similar, which also occur in
+    # Traditional text) were nominated but excluded.
+    '让给识边条亲观质买断续际难虽够态价众优坏严丰丽举么义乌乔乡乱亏亚亩亿仅从仑仓仪伦伟传伤伪佣侠侣侥侦侧侨俭债倾偿储儿兑兰兴养兽册农冯决况冻净凉减凑凤凭凯击凿刘则刚创删别剂刹剑劝办励劲势勋匀协单卖卢卤卧卫厂厅厉厌双变叙叠号叹吗听启吴吕贪贫货贩购贮贯贴贵贱贷贸费贺贼贾贿赂赁赊赋赌赎赏赐赔赖赚赛赠赞赢赃实宠审宽尔属层岛岭币帅帐帮带宾宫寿尝届屡巩帜帧庆庞庙苏苹茧荧获营萤萧萨葱蒋蓝蓟蔼藓'
 )
 TRADITIONAL_ONLY_CHARS = frozenset(
     '國學學習漢語測試簡體個們為這對時間過還進遠運長門問關開閉現點電車馬龍風雲熱氣壓產業務經經濟歷樂書畫寫讀說話認記視聲響圖區醫員場園縣鎮戶務動勞團戰爭軍'
     '軟網絡數應術據庫腦頭灣轉達標備設計機統選頁內顯錯確譯論證評議題導師級'
     '習題錄頻藥響'
+    # Traditional counterparts of the cycle-5 expansion above, in the
+    # same order, verified the same way.
+    '讓給識邊條親觀質買斷續際難雖夠態價衆優壞嚴豐麗舉麼義烏喬鄉亂虧亞畝億僅從侖倉儀倫偉傳傷僞傭俠侶僥偵側僑儉債傾償儲兒兌蘭興養獸冊農馮決況凍淨涼減湊鳳憑凱擊鑿劉則剛創刪別劑剎劍勸辦勵勁勢勳勻協單賣盧滷臥衛廠廳厲厭雙變敘疊號嘆嗎聽啓吳呂貪貧貨販購貯貫貼貴賤貸貿費賀賊賈賄賂賃賒賦賭贖賞賜賠賴賺賽贈贊贏贓實寵審寬爾屬層島嶺幣帥帳幫帶賓宮壽嘗屆屢鞏幟幀慶龐廟蘇蘋繭熒獲營螢蕭薩蔥蔣藍薊藹蘚'
 )
 
 
@@ -304,7 +322,12 @@ class AccuracyFirstChineseTranslator:
         mapping: Dict[str, str] = {}
         combined = re.compile('|'.join(f'(?:{p})' for p in patterns), re.I if prefix == 'PROT' else 0)
         matches = [(m.start(), m.end()) for m in combined.finditer(text)
-                   if prefix != 'TECH' or not TOKEN_RE.fullmatch(m.group())]
+                   if prefix != 'TECH' or not TOKEN_RE.search(m.group())]
+        # For TECH: a match that merely *is* a token was already excluded,
+        # but a match that *contains* a token plus extra letters (e.g.
+        # ZZTERM0001ZZDS) must be excluded too. Protecting it would restore
+        # the whole span literally in the single restore pass and leak the
+        # inner glossary token into the final output unrestored.
         # Regex alone cannot protect nested templates/wikilinks. Add balanced
         # outer spans before choosing non-overlapping ranges.
         if prefix == 'PROT':
@@ -375,7 +398,21 @@ class AccuracyFirstChineseTranslator:
         mapping: Dict[str, str] = {}
         if not glossary:
             return text, mapping
-        terms = re.compile('|'.join(re.escape(src) for src in sorted(glossary, key=len, reverse=True)))
+        def term_pattern(src: str) -> str:
+            # An ASCII glossary key must not match inside a longer ASCII
+            # word: key "AI" rewriting "AIDS" corrupted the word and left
+            # an unrestored ZZTERM token in the output (the token+letters
+            # span was then swallowed as one technical token). CJK keys
+            # keep substring matching, which is how Japanese/Chinese
+            # compounds are written.
+            pat = re.escape(src)
+            if src and src[0].isascii() and (src[0].isalnum() or src[0] == '_'):
+                pat = r'(?<![A-Za-z0-9_])' + pat
+            if src and src[-1].isascii() and (src[-1].isalnum() or src[-1] == '_'):
+                pat += r'(?![A-Za-z0-9_])'
+            return pat
+
+        terms = re.compile('|'.join(term_pattern(src) for src in sorted(glossary, key=len, reverse=True)))
 
         def replace(match):
             index = len(mapping)
@@ -450,8 +487,29 @@ class AccuracyFirstChineseTranslator:
         return round(100.0 * SequenceMatcher(None, a, b).ratio(), 1)
 
     @staticmethod
-    def _numbers(text: str) -> List[str]:
-        return NUMBER_RE.findall(text)
+    def _canonical_number(raw: str) -> str:
+        """Canonical form for comparison: 10,000 / 10000, 12.50 / 12.5 and
+        12.5% / 12.5 % are the same number; 12.5 vs 12.6 still differ."""
+        from decimal import Decimal, InvalidOperation
+        percent = raw.rstrip().endswith('%')
+        s = re.sub(r'\s+', '', raw).rstrip('%')
+        try:
+            if re.fullmatch(r'[+-]?\d{1,3}([.,]\d{3})+', s):
+                s = re.sub(r'[.,]', '', s)  # pure thousands grouping
+            elif ',' in s and '.' in s:
+                s = s.replace(',', '')  # 1,234.5 style
+            elif s.count(',') == 1 and '.' not in s:
+                s = s.replace(',', '.')  # decimal comma: 1,5
+            elif ',' in s:
+                s = s.replace(',', '')
+            value = Decimal(s)
+        except InvalidOperation:
+            return raw
+        return format(value.normalize(), 'f') + ('%' if percent else '')
+
+    @classmethod
+    def _numbers(cls, text: str) -> List[str]:
+        return [cls._canonical_number(m) for m in NUMBER_RE.findall(text.translate(_NUMBER_NORMALIZE))]
 
     @staticmethod
     def _technical_tokens(text: str) -> List[str]:
@@ -803,11 +861,21 @@ class AccuracyFirstChineseTranslator:
             src_label = NLLB_TO_LABEL.get(src_code, src_code)
 
         glossary = self.parse_glossary(glossary_text)
-        sentences = self.split_sentences(text)
-        results = [
-            self.translate_sentence(s, src_code, target, style, glossary, run_backtranslation)
-            for s in sentences
-        ]
+        # Preserve paragraph breaks: sentences were previously flattened
+        # into one '\n'-joined block, so a multi-paragraph document came
+        # back as a single paragraph. Translate paragraph by paragraph;
+        # the flat per-sentence results list is unchanged.
+        results = []
+        paragraph_texts = []
+        for paragraph in re.split(r'\n{2,}', text.strip()):
+            if not paragraph.strip():
+                continue
+            paragraph_results = [
+                self.translate_sentence(s, src_code, target, style, glossary, run_backtranslation)
+                for s in self.split_sentences(paragraph)
+            ]
+            results.extend(paragraph_results)
+            paragraph_texts.append('\n'.join(r['translation'] for r in paragraph_results if r['translation']))
 
         if any(r['status'] == 'HOLD' for r in results):
             overall = 'HOLD'
@@ -832,7 +900,7 @@ class AccuracyFirstChineseTranslator:
             'style': style,
             'engine': MODEL_NAME,
             'sentence_count': len(results),
-            'translation': '\n'.join(r['translation'] for r in results if r['translation']),
+            'translation': '\n\n'.join(paragraph_texts).strip('\n'),
             'document_checks': document_checks,
             'sentences': results,
         }
