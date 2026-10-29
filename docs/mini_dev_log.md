@@ -137,3 +137,8 @@
 - 未実施・残作業: 実キーでの実翻訳確認は未実施。公開先で有効化するには、Azure 側で Translator リソース（F0）を作成し、Render の環境変数に `AZURE_TRANSLATOR_KEY`（必要なら `AZURE_TRANSLATOR_REGION`）を設定する必要がある（キー発行と環境変数設定は所有者の作業）。Render のビルドを `requirements-api.txt` へ切り替えるかどうかも未決定（現行 requirements.txt のままでも動作するが、torch 等の導入ぶんビルドが重い）。
 - 本ブランチは Draft PR として提出し、マージはユーザーの判断を待つ。ChatGPT側ブランチ `ai/chatgpt/zhtranslate-reliability-20261029` は残存したままで、本作業では触れていない。
 
+## エントリ11 追記（2026-10-29）公開先での有効化と実翻訳確認が完了
+
+- 有効化の経緯: Azure アカウントは通常の無料登録が本人確認にクレジットカードを必須とし進めなかったため、Azure for Students（カード不要・学校メール認証）で作成した。Translator リソースの作成では、サブスクリプションのポリシー割り当て「Allowed resource deployment regions」により Japan East と東南アジアが許可外（RequestDisallowedByAzure）だったため、許可リスト内にある Australia East に作成した（価格レベルは Free F0）。Render の環境変数に `AZURE_TRANSLATOR_KEY` と `AZURE_TRANSLATOR_REGION=australiaeast` を登録し、PR #5 をマージした（マージコミット `ed2528b`、Render の Auto-Deploy で Live 化）。
+- 最終確認（2026-10-29 18:48 JST、公開先で実地確認）: `/api/health` が revision `ed2528b2…`・engine `azure`・model_state `api_ready`・translation_ready `true` を返した。実翻訳では、従来メモリ不足で停止していた文「インドは南アジアにある国家である。」が簡体字「印度是位于南亚的一个国家。」へ翻訳できた。全体判定が REVIEW なのは、AUTO_LANGUAGE（入力言語の自動判定に対する注意喚起）と、本構成では Stanza が未搭載で中国語解析の検査が未実行になることによるもので、いずれも想定どおり。逆翻訳チェックも動作し、一致度は 76.5%。
+- これにより、エントリ11の「未実施・残作業」のうち実キーでの実翻訳確認と公開先での有効化は完了した。残る未決定事項は、Render のビルドを `requirements-api.txt` へ切り替えるかどうか のみ。
